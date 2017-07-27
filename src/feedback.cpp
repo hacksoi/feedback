@@ -4,8 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
-#include <GL/glew.h>
-#include <GL/wglew.h>
+#include "GL/glew.h"
+#include "GL/wglew.h"
 
 #define Kilobytes(NumberOfKbs) (NumberOfKbs * 1024)
 #define Megabytes(NumberOfMbs) (NumberOfMbs * 1024 * 1024)
