@@ -454,11 +454,11 @@ WinMain(HINSTANCE hInstance,
     uint32_t RenderDelayMillis = 16;
     SetTimer(WindowHandle, SCROLL_TIMER_ID, RenderDelayMillis, NULL);
 
-    GameState.StartTime = Win32GetCurrentTime();
-
-    float SingleFrameTime = (16 / 1000.0f);
+    float SingleFrameTime = (float)RenderDelayMillis / 1000.0f;
 
     uint32_t NumFramesPassedSinceLastMouseMove = 0;
+
+    GameState.StartTime = Win32GetCurrentTime();
 
     MSG Message;
     while(GetMessage(&Message, NULL, 0, 0))
