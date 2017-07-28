@@ -1,4 +1,5 @@
-#include <windows.h>
+#include <Windows.h>
+#include <Windowsx.h>
 #include <stdint.h>
 
 #include <stdio.h>
@@ -20,19 +21,32 @@
 
 #define SCROLL_TIMER_ID 0
 
+static HDC GlobalDeviceContextHandle;
+
 struct time_point
 {
     float Time, Y;
 };
 
-struct game_state
+struct app_state
 {
-    float StartTime;
+    uint32_t WindowWidth;
+    uint32_t WindowHeight;
+
+    uint32_t ShaderProgram;
+    uint32_t Vbo;
+    uint32_t Vao;
 
     time_point *TimePoints;
     uint32_t TimePointsCapacity;
     uint32_t TimePointsUsed;
     uint32_t TimePointsInVbo;
+
+    float CameraTimePos;
+
+    float PixelsPerSecond;
+
+    float StartTime;
 };
 
 static char *VertexShaderSource = R"STR(
@@ -48,6 +62,7 @@ main()
 {
     vec2 NewPos = vec2((Pos.x - CameraTimePos) * PixelsPerSecond, Pos.y);
 
+    // convert to clip space
     NewPos.x = 2 * NewPos.x / WindowDimensions.x - 1;
     NewPos.y = 2 * NewPos.y / WindowDimensions.y - 1;
 
@@ -206,11 +221,11 @@ WindowProc(HWND hwnd,
 }
 
 static void
-PushTimePoint(game_state *GameState, float Time, float Y)
+PushTimePoint(app_state *AppState, float Time, float Y)
 {
-    if(GameState->TimePointsUsed < GameState->TimePointsCapacity)
+    if(AppState->TimePointsUsed < AppState->TimePointsCapacity)
     {
-        time_point *NewTimePoint = &GameState->TimePoints[GameState->TimePointsUsed++];
+        time_point *NewTimePoint = &AppState->TimePoints[AppState->TimePointsUsed++];
 
         NewTimePoint->Time = Time;
         NewTimePoint->Y = Y;
@@ -218,24 +233,41 @@ PushTimePoint(game_state *GameState, float Time, float Y)
 }
 
 static void
-PushTimePoint(game_state *GameState, float Y)
+PushTimePoint(app_state *AppState, float Y)
 {
-    PushTimePoint(GameState, Win32GetElapsedTime(GameState->StartTime), Y);
+    PushTimePoint(AppState, Win32GetElapsedTime(AppState->StartTime), Y);
 }
 
 static void
-PushLastTimePoint(game_state *GameState, float Time)
+PushLastTimePoint(app_state *AppState, float Time)
 {
-    if(GameState->TimePointsUsed > 0)
+    if(AppState->TimePointsUsed > 0)
     {
-        PushTimePoint(GameState, Time, GameState->TimePoints[GameState->TimePointsUsed-1].Y);
+        PushTimePoint(AppState, Time, AppState->TimePoints[AppState->TimePointsUsed-1].Y);
     }
 }
 
 static void
-PopTimePoint(game_state *GameState)
+PopTimePoint(app_state *AppState)
 {
-    GameState->TimePointsUsed--;
+    AppState->TimePointsUsed--;
+}
+
+static void
+DrawTimePoints(app_state *AppState)
+{
+    float CameraTimePosCentered = AppState->CameraTimePos - (AppState->WindowWidth / 2 / AppState->PixelsPerSecond);
+    glUniform1f(GetUniformLocation(AppState->ShaderProgram, "CameraTimePos"), CameraTimePosCentered);
+
+    glUniform1f(GetUniformLocation(AppState->ShaderProgram, "PixelsPerSecond"), AppState->PixelsPerSecond);
+
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glUseProgram(AppState->ShaderProgram);
+    glBindVertexArray(AppState->Vao);
+    glDrawArrays(GL_LINE_STRIP, 0, AppState->TimePointsInVbo + 1);
+
+    SwapBuffers(GlobalDeviceContextHandle);
 }
 
 int CALLBACK
@@ -378,8 +410,6 @@ WinMain(HINSTANCE hInstance,
         WGL_DOUBLE_BUFFER_ARB, GL_TRUE,
         WGL_PIXEL_TYPE_ARB, WGL_TYPE_RGBA_ARB,
         WGL_COLOR_BITS_ARB, 32,
-        WGL_SAMPLE_BUFFERS_ARB, 1,
-        WGL_SAMPLES_ARB, 4,
         0
     };
 
@@ -409,45 +439,57 @@ WinMain(HINSTANCE hInstance,
         Win32PrintErrorAndExit("wglMakeCurrent");
     }
 
-    glEnable(GL_MULTISAMPLE);
+    GlobalDeviceContextHandle = DeviceContextHandle;
+
+    glEnable(GL_LINE_SMOOTH);
+    glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     /* Begin application code. */
 
-    game_state GameState = {};
-    GameState.TimePointsCapacity = Megabytes(1) / sizeof(time_point);
-    GameState.TimePoints = (time_point *)malloc(GameState.TimePointsCapacity * sizeof(time_point));
+    app_state AppState = {};
+    AppState.WindowWidth = WindowWidth;
+    AppState.WindowHeight = WindowHeight;
 
-    float PixelsPerSecond = (float)WindowWidth / 5.0f;
+    AppState.TimePointsCapacity = Megabytes(1) / sizeof(time_point);
+    AppState.TimePoints = (time_point *)malloc(AppState.TimePointsCapacity * sizeof(time_point));
+
+    AppState.PixelsPerSecond = (float)WindowWidth / 5.0f;
+    float PixelsPerSecondDelta = 5.0f;
 
     glViewport(0, 0, WindowWidth, WindowHeight);
 
     uint32_t VertexShader = CreateShader(GL_VERTEX_SHADER, VertexShaderSource);
     uint32_t FragmentShader = CreateShader(GL_FRAGMENT_SHADER, FragmentShaderSource);
 
-    uint32_t ShaderProgram = glCreateProgram();
-    glAttachShader(ShaderProgram, VertexShader);
-    glAttachShader(ShaderProgram, FragmentShader);
-    glLinkProgram(ShaderProgram);
-    CheckSuccess(glGetProgramiv, glGetProgramInfoLog, ShaderProgram, 
+    AppState.ShaderProgram = glCreateProgram();
+    glAttachShader(AppState.ShaderProgram, VertexShader);
+    glAttachShader(AppState.ShaderProgram, FragmentShader);
+    glLinkProgram(AppState.ShaderProgram);
+    CheckSuccess(glGetProgramiv, glGetProgramInfoLog, AppState.ShaderProgram, 
                  GL_LINK_STATUS, "Error linking shader program: \n");
 
     glDeleteShader(VertexShader);
     glDeleteShader(FragmentShader);
 
-    glUseProgram(ShaderProgram);
-    glUniform2f(GetUniformLocation(ShaderProgram, "WindowDimensions"), (float)WindowWidth, (float)WindowHeight);
+    glUseProgram(AppState.ShaderProgram);
+    glUniform2f(GetUniformLocation(AppState.ShaderProgram, "WindowDimensions"), (float)WindowWidth, (float)WindowHeight);
 
-    uint32_t Vbo;
-    glGenBuffers(1, &Vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, Vbo);
-    glBufferData(GL_ARRAY_BUFFER, GameState.TimePointsCapacity * sizeof(time_point), NULL, GL_DYNAMIC_DRAW);
+    glGenBuffers(1, &AppState.Vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, AppState.Vbo);
+    glBufferData(GL_ARRAY_BUFFER, AppState.TimePointsCapacity * sizeof(time_point), NULL, GL_DYNAMIC_DRAW);
 
-    uint32_t Vao;
-    glGenVertexArrays(1, &Vao);
-    glBindVertexArray(Vao);
+    glGenVertexArrays(1, &AppState.Vao);
+    glBindVertexArray(AppState.Vao);
 
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void *)0);
     glEnableVertexAttribArray(0);
+
+    glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    SwapBuffers(GlobalDeviceContextHandle);
 
     glLineWidth(2.0f);
 
@@ -458,70 +500,119 @@ WinMain(HINSTANCE hInstance,
 
     uint32_t NumFramesPassedSinceLastMouseMove = 0;
 
-    GameState.StartTime = Win32GetCurrentTime();
+    bool IsTraceMode = false;
+    float TimeWhenExitedTraceMode = 0;
+
+    int LastMousePosX = 0;
+
+    AppState.StartTime = Win32GetCurrentTime();
 
     MSG Message;
     while(GetMessage(&Message, NULL, 0, 0))
     {
         TranslateMessage(&Message);
 
-        float CurrentTime = Win32GetElapsedTime(GameState.StartTime);
+        if(Message.message == WM_LBUTTONDOWN)
+        {
+            AppState.StartTime = Win32GetCurrentTime() - TimeWhenExitedTraceMode;
 
-        if(Message.message == WM_MOUSEMOVE)
+            IsTraceMode = true;
+        }
+        else if(Message.message == WM_LBUTTONUP)
+        {
+            TimeWhenExitedTraceMode = Win32GetElapsedTime(AppState.StartTime);
+
+            IsTraceMode = false;
+        }
+
+        if(Message.message == WM_MOUSEWHEEL)
+        {
+            int WheelDelta = GET_WHEEL_DELTA_WPARAM(Message.wParam);
+
+            if(WheelDelta > 0)
+            {
+                AppState.PixelsPerSecond += PixelsPerSecondDelta;
+            }
+            else if(WheelDelta < 0)
+            {
+                AppState.PixelsPerSecond -= PixelsPerSecondDelta;
+            }
+
+            if(AppState.PixelsPerSecond < 1)
+            {
+                AppState.PixelsPerSecond = 1;
+            }
+
+            Printf("%f\n", AppState.PixelsPerSecond);
+
+            DrawTimePoints(&AppState);
+        }
+
+        bool IsRmbMovement = (Message.message == WM_MOUSEMOVE && 
+                              Message.wParam & MK_RBUTTON);
+        if(!IsTraceMode && IsRmbMovement)
+        {
+            int CurrentMousePosX = GET_X_LPARAM(Message.lParam);
+            int MouseDeltaX = CurrentMousePosX - LastMousePosX;
+
+            AppState.CameraTimePos -= ((float)MouseDeltaX / 100.0f);
+
+            DrawTimePoints(&AppState);
+        }
+
+        float CurrentTime = Win32GetElapsedTime(AppState.StartTime);
+
+        if(IsTraceMode && 
+           (Message.message == WM_MOUSEMOVE ||
+            Message.message == WM_LBUTTONDOWN))
         {
             if(NumFramesPassedSinceLastMouseMove > 1)
             {
-                PushLastTimePoint(&GameState, CurrentTime - SingleFrameTime);
+                PushLastTimePoint(&AppState, CurrentTime - SingleFrameTime);
             }
 
-            uint32_t FlippedY = (uint32_t)(Message.lParam >> 16);
-            uint32_t Y = WindowHeight - FlippedY;
+            int FlippedY = GET_Y_LPARAM(Message.lParam);
+            int Y = WindowHeight - FlippedY;
 
-            PushTimePoint(&GameState, (float)Y);
+            PushTimePoint(&AppState, (float)Y);
 
             NumFramesPassedSinceLastMouseMove = 0;
         }
-        else if(Message.message == WM_TIMER &&
-                Message.wParam == SCROLL_TIMER_ID)
+        else if(IsTraceMode &&
+                (Message.message == WM_TIMER &&
+                 Message.wParam == SCROLL_TIMER_ID))
         {
-            if(GameState.TimePointsUsed > 0)
+            if(AppState.TimePointsUsed > 0)
             {
                 // add dummy time point
-                PushTimePoint(&GameState, CurrentTime, GameState.TimePoints[GameState.TimePointsUsed - 1].Y);
+                PushTimePoint(&AppState, CurrentTime, AppState.TimePoints[AppState.TimePointsUsed - 1].Y);
 
-                uint32_t CopyOffset = GameState.TimePointsInVbo * sizeof(time_point);
-                uint32_t NumBytesToCopy = (GameState.TimePointsUsed - GameState.TimePointsInVbo + 1) * sizeof(time_point);
+                uint32_t CopyOffset = AppState.TimePointsInVbo * sizeof(time_point);
+                uint32_t NumBytesToCopy = (AppState.TimePointsUsed - AppState.TimePointsInVbo + 1) * sizeof(time_point);
 
-                glBindBuffer(GL_ARRAY_BUFFER, Vbo);
-                glBufferSubData(GL_ARRAY_BUFFER, CopyOffset, NumBytesToCopy, &GameState.TimePoints[GameState.TimePointsInVbo]);
+                glBindBuffer(GL_ARRAY_BUFFER, AppState.Vbo);
+                glBufferSubData(GL_ARRAY_BUFFER, CopyOffset, NumBytesToCopy, &AppState.TimePoints[AppState.TimePointsInVbo]);
 
                 // remove dummy time point
-                PopTimePoint(&GameState);
+                PopTimePoint(&AppState);
 
-                GameState.TimePointsInVbo = GameState.TimePointsUsed;
+                AppState.TimePointsInVbo = AppState.TimePointsUsed;
             }
 
             NumFramesPassedSinceLastMouseMove++;
 
-            glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
-            glClear(GL_COLOR_BUFFER_BIT);
+            AppState.CameraTimePos = CurrentTime;
 
-            float CameraTimePos = CurrentTime - (WindowWidth / 2 / PixelsPerSecond);
-            glUniform1f(GetUniformLocation(ShaderProgram, "CameraTimePos"), CameraTimePos);
-
-            glUniform1f(GetUniformLocation(ShaderProgram, "PixelsPerSecond"), PixelsPerSecond);
-
-            glUseProgram(ShaderProgram);
-            glBindVertexArray(Vao);
-            glDrawArrays(GL_LINE_STRIP, 0, GameState.TimePointsInVbo + 1);
-
-            //Printf("%u\n", GameState.TimePointsUsed);
-
-            SwapBuffers(DeviceContextHandle);
+            DrawTimePoints(&AppState);
         }
         else
         {
             DispatchMessage(&Message);
+        }
+
+        if(Message.message == WM_MOUSEMOVE)
+        {
+            LastMousePosX = GET_X_LPARAM(Message.lParam);
         }
     }
 
