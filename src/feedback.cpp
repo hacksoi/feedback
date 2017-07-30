@@ -42,11 +42,12 @@ struct app_state
     uint32_t TimePointsUsed;
     uint32_t TimePointsInVbo;
 
+    float PixelsPerSecond;
+    float StartTime;
+    float SingleFrameTime;
     float CameraTimePos;
 
-    float PixelsPerSecond;
-
-    float StartTime;
+    uint32_t NumFramesPassedSinceLastMouseMove;
 };
 
 static char *VertexShaderSource = R"STR(
@@ -251,6 +252,19 @@ static void
 PopTimePoint(app_state *AppState)
 {
     AppState->TimePointsUsed--;
+}
+
+static void
+HandleTraceModeMovement(app_state *AppState, int FlippedY)
+{
+    if(AppState->NumFramesPassedSinceLastMouseMove > 1)
+    {
+        PushLastTimePoint(AppState, Win32GetElapsedTime(AppState->StartTime) - AppState->SingleFrameTime);
+    }
+
+    PushTimePoint(AppState, (float)(AppState->WindowHeight - FlippedY));
+
+    AppState->NumFramesPassedSinceLastMouseMove = 0;
 }
 
 static void
@@ -498,8 +512,6 @@ WinMain(HINSTANCE hInstance,
 
     float SingleFrameTime = (float)RenderDelayMillis / 1000.0f;
 
-    uint32_t NumFramesPassedSinceLastMouseMove = 0;
-
     bool IsTraceMode = false;
     float TimeWhenExitedTraceMode = 0;
 
@@ -512,107 +524,108 @@ WinMain(HINSTANCE hInstance,
     {
         TranslateMessage(&Message);
 
-        if(Message.message == WM_LBUTTONDOWN)
+        switch(Message.message)
         {
-            AppState.StartTime = Win32GetCurrentTime() - TimeWhenExitedTraceMode;
-
-            IsTraceMode = true;
-        }
-        else if(Message.message == WM_LBUTTONUP)
-        {
-            TimeWhenExitedTraceMode = Win32GetElapsedTime(AppState.StartTime);
-
-            IsTraceMode = false;
-        }
-
-        if(Message.message == WM_MOUSEWHEEL)
-        {
-            int WheelDelta = GET_WHEEL_DELTA_WPARAM(Message.wParam);
-
-            if(WheelDelta > 0)
+            case WM_LBUTTONDOWN:
             {
-                AppState.PixelsPerSecond += PixelsPerSecondDelta;
-            }
-            else if(WheelDelta < 0)
+                AppState.StartTime = Win32GetCurrentTime() - TimeWhenExitedTraceMode;
+
+                IsTraceMode = true;
+
+                if(IsTraceMode)
+                {
+                    HandleTraceModeMovement(&AppState, GET_Y_LPARAM(Message.lParam));
+                }
+            } break;
+
+            case WM_LBUTTONUP:
             {
-                AppState.PixelsPerSecond -= PixelsPerSecondDelta;
-            }
+                TimeWhenExitedTraceMode = Win32GetElapsedTime(AppState.StartTime);
 
-            if(AppState.PixelsPerSecond < 1)
+                IsTraceMode = false;
+            } break;
+
+            case WM_MOUSEWHEEL:
             {
-                AppState.PixelsPerSecond = 1;
-            }
+                int WheelDelta = GET_WHEEL_DELTA_WPARAM(Message.wParam);
 
-            Printf("%f\n", AppState.PixelsPerSecond);
+                if(WheelDelta > 0)
+                {
+                    AppState.PixelsPerSecond += PixelsPerSecondDelta;
+                }
+                else if(WheelDelta < 0)
+                {
+                    AppState.PixelsPerSecond -= PixelsPerSecondDelta;
+                }
 
-            DrawTimePoints(&AppState);
-        }
+                if(AppState.PixelsPerSecond < 1)
+                {
+                    AppState.PixelsPerSecond = 1;
+                }
 
-        bool IsRmbMovement = (Message.message == WM_MOUSEMOVE && 
-                              Message.wParam & MK_RBUTTON);
-        if(!IsTraceMode && IsRmbMovement)
-        {
-            int CurrentMousePosX = GET_X_LPARAM(Message.lParam);
-            int MouseDeltaX = CurrentMousePosX - LastMousePosX;
+                Printf("%f\n", AppState.PixelsPerSecond);
 
-            AppState.CameraTimePos -= ((float)MouseDeltaX / 100.0f);
+                DrawTimePoints(&AppState);
+            } break;
 
-            DrawTimePoints(&AppState);
-        }
-
-        float CurrentTime = Win32GetElapsedTime(AppState.StartTime);
-
-        if(IsTraceMode && 
-           (Message.message == WM_MOUSEMOVE ||
-            Message.message == WM_LBUTTONDOWN))
-        {
-            if(NumFramesPassedSinceLastMouseMove > 1)
+            case WM_MOUSEMOVE:
             {
-                PushLastTimePoint(&AppState, CurrentTime - SingleFrameTime);
-            }
+                int MousePosX = GET_X_LPARAM(Message.lParam);
 
-            int FlippedY = GET_Y_LPARAM(Message.lParam);
-            int Y = WindowHeight - FlippedY;
+                if(IsTraceMode)
+                {
+                    HandleTraceModeMovement(&AppState, GET_Y_LPARAM(Message.lParam));
+                }
+                else//if(!IsTraceMode)
+                {
+                    if(Message.wParam & MK_RBUTTON)
+                    {
+                        // move the camera position
 
-            PushTimePoint(&AppState, (float)Y);
+                        int MouseDeltaX = MousePosX - LastMousePosX;
+                        AppState.CameraTimePos -= ((float)MouseDeltaX / 100.0f);
 
-            NumFramesPassedSinceLastMouseMove = 0;
-        }
-        else if(IsTraceMode &&
-                (Message.message == WM_TIMER &&
-                 Message.wParam == SCROLL_TIMER_ID))
-        {
-            if(AppState.TimePointsUsed > 0)
+                        DrawTimePoints(&AppState);
+                    }
+                }
+
+                LastMousePosX = MousePosX;
+            } break;
+
+            case WM_TIMER:
             {
-                // add dummy time point
-                PushTimePoint(&AppState, CurrentTime, AppState.TimePoints[AppState.TimePointsUsed - 1].Y);
+                if(IsTraceMode && 
+                   Message.wParam == SCROLL_TIMER_ID)
+                {
+                    if(AppState.TimePointsUsed > 0)
+                    {
+                        // add dummy time point
+                        PushTimePoint(&AppState, Win32GetElapsedTime(AppState.StartTime), AppState.TimePoints[AppState.TimePointsUsed - 1].Y);
 
-                uint32_t CopyOffset = AppState.TimePointsInVbo * sizeof(time_point);
-                uint32_t NumBytesToCopy = (AppState.TimePointsUsed - AppState.TimePointsInVbo + 1) * sizeof(time_point);
+                        uint32_t CopyOffset = AppState.TimePointsInVbo * sizeof(time_point);
+                        uint32_t NumBytesToCopy = (AppState.TimePointsUsed - AppState.TimePointsInVbo + 1) * sizeof(time_point);
 
-                glBindBuffer(GL_ARRAY_BUFFER, AppState.Vbo);
-                glBufferSubData(GL_ARRAY_BUFFER, CopyOffset, NumBytesToCopy, &AppState.TimePoints[AppState.TimePointsInVbo]);
+                        glBindBuffer(GL_ARRAY_BUFFER, AppState.Vbo);
+                        glBufferSubData(GL_ARRAY_BUFFER, CopyOffset, NumBytesToCopy, &AppState.TimePoints[AppState.TimePointsInVbo]);
 
-                // remove dummy time point
-                PopTimePoint(&AppState);
+                        // remove dummy time point
+                        PopTimePoint(&AppState);
 
-                AppState.TimePointsInVbo = AppState.TimePointsUsed;
-            }
+                        AppState.TimePointsInVbo = AppState.TimePointsUsed;
+                    }
 
-            NumFramesPassedSinceLastMouseMove++;
+                    AppState.NumFramesPassedSinceLastMouseMove++;
 
-            AppState.CameraTimePos = CurrentTime;
+                    AppState.CameraTimePos = Win32GetElapsedTime(AppState.StartTime);
 
-            DrawTimePoints(&AppState);
-        }
-        else
-        {
-            DispatchMessage(&Message);
-        }
+                    DrawTimePoints(&AppState);
+                }
+            } break;
 
-        if(Message.message == WM_MOUSEMOVE)
-        {
-            LastMousePosX = GET_X_LPARAM(Message.lParam);
+            default:
+            {
+                DispatchMessage(&Message);
+            } break;
         }
     }
 
