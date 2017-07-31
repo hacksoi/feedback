@@ -10,6 +10,8 @@
 
 #include "imgui/imgui.h"
 
+#define local static
+
 #define Kilobytes(NumberOfKbs) (NumberOfKbs * 1024)
 #define Megabytes(NumberOfMbs) (NumberOfMbs * 1024 * 1024)
 #define Gigabytes(NumberOfGbs) (NumberOfGbs * 1024 * 1024 * 1024)
@@ -53,9 +55,15 @@ struct app_state
     uint32_t TimePointsInVbo;
 
     float PixelsPerSecond;
+    float SecondsPerPixel;
+
+    float PixelsPerSecondFactor;
+
+    bool IsTraceMode;
+    float CameraTimePos;
+    float CameraTimePosDeltaPixels;
     float StartTime;
     float SingleFrameTime;
-    float CameraTimePos;
 
     uint32_t NumFramesPassedSinceLastMouseMove;
 };
@@ -348,164 +356,8 @@ Win32Init(HINSTANCE hInstance,
     GlobalWindowHandle = WindowHandle;
 }
 
-inline static void
-glClearColor(color Color)
-{
-    glClearColor(Color.R, Color.G, Color.B, Color.A);
-}
-
 static void
-SetColor(color *Color, float R, float G, float B, float A)
-{
-    Color->R = R;
-    Color->G = G;
-    Color->B = B;
-    Color->A = A;
-}
-
-typedef void check_function(GLuint object, GLenum name, GLint *params);
-typedef void get_info_function(GLuint object, GLsizei maxLength, GLsizei *length, GLchar *infoLog);
-static void
-CheckSuccess(check_function CheckFunction, get_info_function GetInfoFunction, 
-             uint32_t Object, GLenum QueryName, char *ExitMessage)
-{
-    int Success;
-    CheckFunction(Object, QueryName, &Success);
-    if(!Success)
-    {
-        size_t ExitMessageLength = (size_t)strlen(ExitMessage);
-
-        strcpy(GeneralBuffer, ExitMessage);
-        GetInfoFunction(Object, (GLsizei)(sizeof(GeneralBuffer) - ExitMessageLength - 1), 
-                        NULL, GeneralBuffer + ExitMessageLength);
-
-        Printf("%s\n", GeneralBuffer);
-        ExitProcess(1);
-    }
-}
-
-static uint32_t
-CreateShader(GLenum ShaderType, char *ShaderSource)
-{
-    uint32_t Shader = glCreateShader(ShaderType);
-    glShaderSource(Shader, 1, &ShaderSource, NULL);
-    glCompileShader(Shader);
-
-    if(ShaderType == GL_VERTEX_SHADER)
-    {
-        CheckSuccess(glGetShaderiv, glGetShaderInfoLog, Shader, 
-                     GL_COMPILE_STATUS, "Error compiling vertex shader: \n");
-    }
-    else/* if(ShaderType == GL_FRAGMENT_SHADER)*/
-    {
-        CheckSuccess(glGetShaderiv, glGetShaderInfoLog, Shader, 
-                     GL_COMPILE_STATUS, "Error compiling fragment shader: \n");
-    }
-
-    return Shader;
-}
-
-static int32_t
-GetUniformLocation(uint32_t ShaderProgram, char *UniformName)
-{
-    int32_t UniformLocation = glGetUniformLocation(ShaderProgram, UniformName);
-
-    if(UniformLocation == -1)
-    {
-        Printf("Error: could not find uniform '%s'.\n", UniformName);
-        ExitProcess(1);
-    }
-
-    return UniformLocation;
-}
-
-static void
-PushTimePoint(app_state *AppState, float Time, float Y)
-{
-    if(AppState->TimePointsUsed < AppState->TimePointsCapacity)
-    {
-        time_point *NewTimePoint = &AppState->TimePoints[AppState->TimePointsUsed++];
-
-        NewTimePoint->Time = Time;
-        NewTimePoint->Y = Y;
-    }
-}
-
-static void
-PushTimePoint(app_state *AppState, float Y)
-{
-    PushTimePoint(AppState, Win32GetElapsedTime(AppState->StartTime), Y);
-}
-
-static void
-PushLastTimePoint(app_state *AppState, float Time)
-{
-    if(AppState->TimePointsUsed > 0)
-    {
-        PushTimePoint(AppState, Time, AppState->TimePoints[AppState->TimePointsUsed-1].Y);
-    }
-}
-
-static void
-PopTimePoint(app_state *AppState)
-{
-    AppState->TimePointsUsed--;
-}
-
-static void
-HandleTraceModeMovement(app_state *AppState, int FlippedY)
-{
-    if(AppState->NumFramesPassedSinceLastMouseMove > 1)
-    {
-        PushLastTimePoint(AppState, Win32GetElapsedTime(AppState->StartTime) - AppState->SingleFrameTime);
-    }
-
-    PushTimePoint(AppState, (float)(AppState->WindowHeight - FlippedY));
-
-    AppState->NumFramesPassedSinceLastMouseMove = 0;
-}
-
-static void
-RedrawScreen(app_state *AppState)
-{
-    float CameraTimePosCentered = AppState->CameraTimePos - (AppState->WindowWidth / 2 / AppState->PixelsPerSecond);
-    glUniform1f(GetUniformLocation(AppState->ShaderProgram, "CameraTimePos"), CameraTimePosCentered);
-    glUniform1f(GetUniformLocation(AppState->ShaderProgram, "PixelsPerSecond"), AppState->PixelsPerSecond);
-
-    glClearColor(AppState->ClearColor);
-    glClear(GL_COLOR_BUFFER_BIT);
-
-    glUseProgram(AppState->ShaderProgram);
-    glBindVertexArray(AppState->Vao);
-    glDrawArrays(GL_LINE_STRIP, 0, AppState->TimePointsInVbo + 1);
-
-    ImGui::NewFrame();
-    ImGui::ShowTestWindow();
-    ImGui::Render();
-
-    SwapBuffers(GlobalDeviceContextHandle);
-}
-
-static void
-ModifyPixelsPerSecond(app_state *AppState, float Delta)
-{
-    AppState->PixelsPerSecond += Delta;
-
-    if(AppState->PixelsPerSecond < 1)
-    {
-        AppState->PixelsPerSecond = 1;
-    }
-
-    Printf("%f\n", AppState->PixelsPerSecond);
-}
-
-static void
-ModifyCameraTimePos(app_state *AppState, float Delta)
-{
-    AppState->CameraTimePos += Delta;
-}
-
-void ImGui_CreateDeviceObjects()
+ImGui_CreateDeviceObjects()
 {
     // Backup GL state
     GLint last_texture, last_array_buffer, last_vertex_array;
@@ -690,6 +542,210 @@ ImGui_RenderFunction(ImDrawData* draw_data)
     glScissor(last_scissor_box[0], last_scissor_box[1], (GLsizei)last_scissor_box[2], (GLsizei)last_scissor_box[3]);
 }
 
+inline static void
+glClearColor(color Color)
+{
+    glClearColor(Color.R, Color.G, Color.B, Color.A);
+}
+
+static void
+SetColor(color *Color, float R, float G, float B, float A)
+{
+    Color->R = R;
+    Color->G = G;
+    Color->B = B;
+    Color->A = A;
+}
+
+typedef void check_function(GLuint object, GLenum name, GLint *params);
+typedef void get_info_function(GLuint object, GLsizei maxLength, GLsizei *length, GLchar *infoLog);
+static void
+CheckSuccess(check_function CheckFunction, get_info_function GetInfoFunction, 
+             uint32_t Object, GLenum QueryName, char *ExitMessage)
+{
+    int Success;
+    CheckFunction(Object, QueryName, &Success);
+    if(!Success)
+    {
+        size_t ExitMessageLength = (size_t)strlen(ExitMessage);
+
+        strcpy(GeneralBuffer, ExitMessage);
+        GetInfoFunction(Object, (GLsizei)(sizeof(GeneralBuffer) - ExitMessageLength - 1), 
+                        NULL, GeneralBuffer + ExitMessageLength);
+
+        Printf("%s\n", GeneralBuffer);
+        ExitProcess(1);
+    }
+}
+
+static uint32_t
+CreateShader(GLenum ShaderType, char *ShaderSource)
+{
+    uint32_t Shader = glCreateShader(ShaderType);
+    glShaderSource(Shader, 1, &ShaderSource, NULL);
+    glCompileShader(Shader);
+
+    if(ShaderType == GL_VERTEX_SHADER)
+    {
+        CheckSuccess(glGetShaderiv, glGetShaderInfoLog, Shader, 
+                     GL_COMPILE_STATUS, "Error compiling vertex shader: \n");
+    }
+    else/* if(ShaderType == GL_FRAGMENT_SHADER)*/
+    {
+        CheckSuccess(glGetShaderiv, glGetShaderInfoLog, Shader, 
+                     GL_COMPILE_STATUS, "Error compiling fragment shader: \n");
+    }
+
+    return Shader;
+}
+
+static int32_t
+GetUniformLocation(uint32_t ShaderProgram, char *UniformName)
+{
+    int32_t UniformLocation = glGetUniformLocation(ShaderProgram, UniformName);
+
+    if(UniformLocation == -1)
+    {
+        Printf("Error: could not find uniform '%s'.\n", UniformName);
+        ExitProcess(1);
+    }
+
+    return UniformLocation;
+}
+
+static void
+PushTimePoint(app_state *AppState, float Time, float Y)
+{
+    if(AppState->TimePointsUsed < AppState->TimePointsCapacity)
+    {
+        time_point *NewTimePoint = &AppState->TimePoints[AppState->TimePointsUsed++];
+
+        NewTimePoint->Time = Time;
+        NewTimePoint->Y = Y;
+    }
+}
+
+static void
+PushTimePoint(app_state *AppState, float Y)
+{
+    PushTimePoint(AppState, Win32GetElapsedTime(AppState->StartTime), Y);
+}
+
+static void
+PushLastTimePoint(app_state *AppState, float Time)
+{
+    if(AppState->TimePointsUsed > 0)
+    {
+        PushTimePoint(AppState, Time, AppState->TimePoints[AppState->TimePointsUsed-1].Y);
+    }
+}
+
+static void
+PopTimePoint(app_state *AppState)
+{
+    AppState->TimePointsUsed--;
+}
+
+static void
+HandleTraceModeMovement(app_state *AppState, int FlippedY)
+{
+#if 0
+    if(AppState->NumFramesPassedSinceLastMouseMove > 1)
+    {
+        PushLastTimePoint(AppState, Win32GetElapsedTime(AppState->StartTime) - AppState->SingleFrameTime);
+    }
+#endif
+
+    PushTimePoint(AppState, (float)(AppState->WindowHeight - FlippedY));
+
+    AppState->NumFramesPassedSinceLastMouseMove = 0;
+}
+
+inline static void
+_SetPixelsPerSecond(app_state *AppState, float NewPixelsPerSecond)
+{
+    AppState->PixelsPerSecond = NewPixelsPerSecond;
+    if(AppState->PixelsPerSecond < 1)
+    {
+        AppState->PixelsPerSecond = 1;
+    }
+
+    AppState->SecondsPerPixel = 1.0f / AppState->PixelsPerSecond;
+}
+
+inline static void
+IncreasePixelsPerSecond(app_state *AppState)
+{
+    _SetPixelsPerSecond(AppState, AppState->PixelsPerSecond * AppState->PixelsPerSecondFactor);
+}
+
+inline static void
+DecreasePixelsPerSecond(app_state *AppState)
+{
+    _SetPixelsPerSecond(AppState, AppState->PixelsPerSecond / AppState->PixelsPerSecondFactor);
+}
+
+inline static void
+IncreaseCameraTimePos(app_state *AppState)
+{
+    AppState->CameraTimePos += (AppState->SecondsPerPixel * AppState->CameraTimePosDeltaPixels);
+}
+
+inline static void
+DecreaseCameraTimePos(app_state *AppState)
+{
+    AppState->CameraTimePos -= (AppState->SecondsPerPixel * AppState->CameraTimePosDeltaPixels);
+}
+
+static void
+RedrawScreen(app_state *AppState)
+{
+    float HalfWindowWidth = (float)AppState->WindowWidth / 2.0f;
+    float CameraTimePosCentered = AppState->CameraTimePos - (AppState->SecondsPerPixel * HalfWindowWidth);
+    glUniform1f(GetUniformLocation(AppState->ShaderProgram, "CameraTimePos"), CameraTimePosCentered);
+    glUniform1f(GetUniformLocation(AppState->ShaderProgram, "PixelsPerSecond"), AppState->PixelsPerSecond);
+
+    glClearColor(AppState->ClearColor);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glUseProgram(AppState->ShaderProgram);
+    glBindVertexArray(AppState->Vao);
+    glDrawArrays(GL_LINE_STRIP, 0, AppState->TimePointsInVbo + 1);
+
+    ImGui::NewFrame();
+    {
+        float GuiWindowWidth = (float)AppState->WindowWidth / 2.1f;
+        float GuiWindowHeight = (float)AppState->WindowHeight / 8.0f;
+
+        float GuiWindowXPos = AppState->WindowWidth - GuiWindowWidth;
+        float GuiWindowYPos = 0;
+
+        ImGui::SetNextWindowSize(ImVec2(GuiWindowWidth, GuiWindowHeight));
+        ImGui::SetNextWindowPos(ImVec2(GuiWindowXPos, GuiWindowYPos));
+        if(ImGui::Begin("window", NULL, 0))
+        {
+            ImGui::PushItemWidth(0.0f);
+            {
+                ImGui::Value("PixelsPerSecond", AppState->PixelsPerSecond);
+
+                local float TraceModeElapsedTime = 0;
+                if(AppState->IsTraceMode)
+                {
+                    TraceModeElapsedTime = Win32GetCurrentTime() - AppState->StartTime;
+                }
+                ImGui::Value("TraceModeElapsedTime", TraceModeElapsedTime);
+
+                ImGui::Value("CameraTimePos", AppState->CameraTimePos);
+            }
+            ImGui::PopItemWidth();
+        }
+        ImGui::End();
+    }
+    ImGui::Render();
+
+    SwapBuffers(GlobalDeviceContextHandle);
+}
+
 int CALLBACK
 WinMain(HINSTANCE hInstance,
         HINSTANCE hPrevInstance,
@@ -715,13 +771,16 @@ WinMain(HINSTANCE hInstance,
     AppState.TimePointsCapacity = Megabytes(1) / sizeof(time_point);
     AppState.TimePoints = (time_point *)malloc(AppState.TimePointsCapacity * sizeof(time_point));
     AppState.PixelsPerSecond = (float)WindowWidth / 5.0f;
+    AppState.SecondsPerPixel = 1.0f / AppState.PixelsPerSecond;
+    AppState.PixelsPerSecondFactor = 1.1f;
     AppState.SingleFrameTime = (float)RenderDelayMillis / 1000.0f;
     SetColor(&AppState.ClearColor, 0.2f, 0.3f, 0.3f, 1.0f);
 
     int LastMousePosX = 0;
-    bool IsTraceMode = false;
     float TimeWhenExitedTraceMode = 0;
-    float BasePixelsPerSecondDelta = 5.0f;
+    float BaseCameraTimePosDelta = 1.0f;
+    float BasePixelsPerSecondDelta = 1.0f;
+    float BasePixelsPerSecondShiftMultiplier = 10.0f;
 
     glEnable(GL_LINE_SMOOTH);
     glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
@@ -760,14 +819,34 @@ WinMain(HINSTANCE hInstance,
     glLineWidth(2.0f);
 
     // initialize IMGUI
-    ImGuiIO& ImGuiIO = ImGui::GetIO();
-    {
-        ImGui_CreateDeviceObjects();
+    ImGui_CreateDeviceObjects();
 
-        ImGuiIO.DisplaySize.x = (float)AppState.WindowWidth;
-        ImGuiIO.DisplaySize.y = (float)AppState.WindowHeight;
-        ImGuiIO.RenderDrawListsFn = ImGui_RenderFunction;
-    }
+    ImGuiIO& ImGuiIO = ImGui::GetIO();
+    ImGuiIO.DisplaySize.x = (float)AppState.WindowWidth;
+    ImGuiIO.DisplaySize.y = (float)AppState.WindowHeight;
+    ImGuiIO.RenderDrawListsFn = ImGui_RenderFunction;
+
+    ImGuiIO.KeyMap[ImGuiKey_Tab] = VK_TAB;
+    ImGuiIO.KeyMap[ImGuiKey_LeftArrow] = VK_LEFT;
+    ImGuiIO.KeyMap[ImGuiKey_RightArrow] = VK_RIGHT;
+    ImGuiIO.KeyMap[ImGuiKey_UpArrow] = VK_UP;
+    ImGuiIO.KeyMap[ImGuiKey_DownArrow] = VK_DOWN;
+    ImGuiIO.KeyMap[ImGuiKey_PageUp] = VK_PRIOR;
+    ImGuiIO.KeyMap[ImGuiKey_PageDown] = VK_NEXT;
+    ImGuiIO.KeyMap[ImGuiKey_Home] = VK_HOME;
+    ImGuiIO.KeyMap[ImGuiKey_End] = VK_END;
+    ImGuiIO.KeyMap[ImGuiKey_Delete] = VK_DELETE;
+    ImGuiIO.KeyMap[ImGuiKey_Backspace] = VK_BACK;
+    ImGuiIO.KeyMap[ImGuiKey_Enter] = VK_RETURN;
+    ImGuiIO.KeyMap[ImGuiKey_Escape] = VK_ESCAPE;
+    ImGuiIO.KeyMap[ImGuiKey_A] = 'A';
+    ImGuiIO.KeyMap[ImGuiKey_C] = 'C';
+    ImGuiIO.KeyMap[ImGuiKey_V] = 'V';
+    ImGuiIO.KeyMap[ImGuiKey_X] = 'X';
+    ImGuiIO.KeyMap[ImGuiKey_Y] = 'Y';
+    ImGuiIO.KeyMap[ImGuiKey_Z] = 'Z';
+
+    bool IsShiftDown = false;
 
     SetTimer(GlobalWindowHandle, SCROLL_TIMER_ID, RenderDelayMillis, NULL);
     AppState.StartTime = Win32GetCurrentTime();
@@ -779,23 +858,11 @@ WinMain(HINSTANCE hInstance,
 
         switch(Message.message)
         {
-            case WM_MOUSEMOVE:
-            case WM_LBUTTONUP:
-            case WM_LBUTTONDOWN:
-            {
-                ImGuiIO.MousePos = ImVec2((float)GET_X_LPARAM(Message.lParam), (float)GET_Y_LPARAM(Message.lParam));
-            } break;
-        }
-
-        switch(Message.message)
-        {
             case WM_LBUTTONDOWN:
             {
                 AppState.StartTime = Win32GetCurrentTime() - TimeWhenExitedTraceMode;
-
-                IsTraceMode = true;
-
                 HandleTraceModeMovement(&AppState, GET_Y_LPARAM(Message.lParam));
+                AppState.IsTraceMode = true;
 
                 ImGuiIO.MouseDown[0] = true;
             } break;
@@ -803,12 +870,12 @@ WinMain(HINSTANCE hInstance,
             case WM_LBUTTONUP:
             {
                 TimeWhenExitedTraceMode = Win32GetElapsedTime(AppState.StartTime);
-
-                IsTraceMode = false;
+                AppState.IsTraceMode = false;
 
                 ImGuiIO.MouseDown[0] = false;
             } break;
 
+#if 0
             case WM_MOUSEWHEEL:
             {
                 int WheelDelta = GET_WHEEL_DELTA_WPARAM(Message.wParam);
@@ -825,12 +892,13 @@ WinMain(HINSTANCE hInstance,
 
                 ModifyPixelsPerSecond(&AppState, PixelsPerSecondDelta);
             } break;
+#endif
 
             case WM_MOUSEMOVE:
             {
                 int MousePosX = GET_X_LPARAM(Message.lParam);
 
-                if(IsTraceMode)
+                if(AppState.IsTraceMode)
                 {
                     HandleTraceModeMovement(&AppState, GET_Y_LPARAM(Message.lParam));
                 }
@@ -841,46 +909,113 @@ WinMain(HINSTANCE hInstance,
                         int MouseDeltaX = MousePosX - LastMousePosX;
                         float CameraTimePosDelta = -((float)MouseDeltaX / 100.0f);
 
-                        ModifyCameraTimePos(&AppState, CameraTimePosDelta);
+                        //ModifyCameraTimePos(&AppState, CameraTimePosDelta);
                     }
                 }
 
                 LastMousePosX = MousePosX;
+
+                ImGuiIO.MousePos = ImVec2((float)GET_X_LPARAM(Message.lParam), (float)GET_Y_LPARAM(Message.lParam));
             } break;
 
             case WM_KEYDOWN:
             {
                 switch(Message.wParam)
                 {
+                    case VK_SHIFT:
+                    {
+                        IsShiftDown = true;
+                    } break;
+
                     case VK_UP:
                     {
-                        ModifyPixelsPerSecond(&AppState, 1);
+                        IncreasePixelsPerSecond(&AppState);
                     } break;
 
                     case VK_DOWN:
                     {
-                        ModifyPixelsPerSecond(&AppState, -1);
-                    } break;
-
-                    case VK_LEFT:
-                    {
-                        ModifyCameraTimePos(&AppState, -1);
+                        DecreasePixelsPerSecond(&AppState);
                     } break;
 
                     case VK_RIGHT:
                     {
-                        ModifyCameraTimePos(&AppState, 1);
+                        DecreaseCameraTimePos(&AppState);
                     } break;
+
+                    case VK_LEFT:
+                    {
+                        IncreaseCameraTimePos(&AppState);
+                    } break;
+                }
+
+                ImGuiIO.KeysDown[Message.wParam] = true;
+
+                char InputChar = -1;
+                switch(Message.wParam)
+                {
+                    case 'A': 
+                    case 'B': 
+                    case 'C':
+                    case 'D': 
+                    case 'E': 
+                    case 'F':
+                    case 'G': 
+                    case 'H': 
+                    case 'I':
+                    case 'J': 
+                    case 'K': 
+                    case 'L':
+                    case 'M': 
+                    case 'N': 
+                    case 'O':
+                    case 'P': 
+                    case 'Q': 
+                    case 'R':
+                    case 'S': 
+                    case 'T': 
+                    case 'U':
+                    case 'V': 
+                    case 'W': 
+                    case 'X':
+                    case 'Y': 
+                    case 'Z':
+                    {
+                        InputChar = (char)Message.wParam;
+
+                        if(!ImGuiIO.KeysDown[VK_SHIFT])
+                        {
+                            InputChar += 32;
+                        }
+                    } break;
+
+                    case ' ':
+                    {
+                        InputChar = (char)Message.wParam;
+                    } break;
+                }
+
+                if(InputChar != -1)
+                {
+                    ImGuiIO.AddInputCharacter(InputChar);
                 }
             } break;
 
             case WM_KEYUP:
             {
+                switch(Message.wParam)
+                {
+                    case VK_SHIFT:
+                    {
+                        IsShiftDown = false;
+                    } break;
+                }
+
+                ImGuiIO.KeysDown[Message.wParam] = false;
             } break;
 
             case WM_TIMER:
             {
-                if(IsTraceMode && 
+                if(AppState.IsTraceMode && 
                    Message.wParam == SCROLL_TIMER_ID)
                 {
                     if(AppState.TimePointsUsed > 0)
