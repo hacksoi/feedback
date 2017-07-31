@@ -24,6 +24,7 @@
 #define SCROLL_TIMER_ID 0
 
 static HDC GlobalDeviceContextHandle;
+static HWND GlobalWindowHandle;
 
 struct color
 {
@@ -157,6 +158,196 @@ Win32GetElapsedTime(float StartTime)
     return ElapsedTime;
 }
 
+LRESULT CALLBACK
+WindowProc(HWND hwnd,
+           UINT uMsg,
+           WPARAM wParam,
+           LPARAM lParam)
+{
+    LRESULT Result = 0;
+
+    switch(uMsg)
+    {
+        case WM_CLOSE:
+        {
+            PostQuitMessage(0);
+        } break;
+
+        default:
+        {
+            Result = DefWindowProc(hwnd, uMsg, wParam, lParam);
+        } break;
+    }
+
+    return Result;
+}
+
+static void
+Win32Init(HINSTANCE hInstance, 
+          uint32_t WindowWidth, uint32_t WindowHeight, 
+          uint32_t ScreenWidth, uint32_t ScreenHeight)
+{
+    WNDCLASS WindowClass = {};
+    WindowClass.style = CS_OWNDC;
+    WindowClass.lpfnWndProc = WindowProc;
+    WindowClass.hInstance = hInstance;
+    WindowClass.lpszClassName = "Window Class";
+    WindowClass.hCursor = LoadCursor(0, IDC_ARROW);
+
+    if(!RegisterClass(&WindowClass))
+    {
+        Win32PrintErrorAndExit("RegisterClass");
+    }
+
+    HWND WindowHandle = CreateWindowEx(0,
+                                       WindowClass.lpszClassName,
+                                       NULL,
+                                       0,
+                                       CW_USEDEFAULT,
+                                       CW_USEDEFAULT,
+                                       CW_USEDEFAULT,
+                                       CW_USEDEFAULT,
+                                       NULL,
+                                       NULL,
+                                       hInstance,
+                                       NULL);
+
+    if(WindowHandle == NULL)
+    {
+        Win32PrintErrorAndExit("Dummy CreateWindowEx");
+    }
+
+    HDC DeviceContextHandle = GetDC(WindowHandle);
+    if(DeviceContextHandle == NULL)
+    {
+        Win32PrintErrorAndExit("Dummy GetDC");
+    }
+
+    PIXELFORMATDESCRIPTOR PixelFormatDescriptor = {};
+    PixelFormatDescriptor.nSize = sizeof(PIXELFORMATDESCRIPTOR);
+    PixelFormatDescriptor.nVersion = 1;
+    PixelFormatDescriptor.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+    PixelFormatDescriptor.iPixelType = PFD_TYPE_RGBA;
+    PixelFormatDescriptor.cColorBits = 32;
+    PixelFormatDescriptor.cDepthBits = 0;
+    PixelFormatDescriptor.cStencilBits = 0;
+    PixelFormatDescriptor.cAuxBuffers = 0;
+    PixelFormatDescriptor.iLayerType = PFD_MAIN_PLANE;
+
+    int PixelFormat = ChoosePixelFormat(DeviceContextHandle, &PixelFormatDescriptor);
+    if(!PixelFormat)
+    {
+        Win32PrintErrorAndExit("ChoosePixelFormat");
+    }
+
+    if(SetPixelFormat(DeviceContextHandle, PixelFormat, &PixelFormatDescriptor) == FALSE)
+    {
+        Win32PrintErrorAndExit("SetPixelFormat");
+    }
+
+    HGLRC GLContextHandle = wglCreateContext(DeviceContextHandle);
+    if(GLContextHandle == NULL)
+    {
+        Win32PrintErrorAndExit("wglCreateContext");
+    }
+
+    if(wglMakeCurrent(DeviceContextHandle, GLContextHandle) == FALSE)
+    {
+        Win32PrintErrorAndExit("wglMakeCurrent");
+    }
+
+    GLenum GlewInitStatusCode = glewInit();
+    if(GlewInitStatusCode != GLEW_OK)
+    {
+        ErrorExit("glewInit", (char *)glewGetErrorString(GlewInitStatusCode));
+    }
+
+    if(!WGLEW_ARB_pixel_format)
+    {
+        ErrorExit("WGL_ARB_pixel_format not supported");
+    }
+
+    if(!WGLEW_ARB_multisample)
+    {
+        ErrorExit("WGL_ARB_multisample not supported");
+    }
+
+    if(!WGLEW_ARB_create_context)
+    {
+        ErrorExit("WGL_ARB_create_context not supported");
+    }
+
+    DestroyWindow(WindowHandle);
+
+    RECT ClientRect = {0, 0, (LONG)WindowWidth, (LONG)WindowHeight};
+    AdjustWindowRect(&ClientRect, WS_OVERLAPPEDWINDOW, FALSE);
+
+    uint32_t ActualWindowWidth = ClientRect.right - ClientRect.left + 1;
+    uint32_t ActualWindowHeight = ClientRect.bottom - ClientRect.top + 1;
+
+    WindowHandle = CreateWindowEx(0,
+                                  WindowClass.lpszClassName,
+                                  "Window Text",
+                                  WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                                  (ScreenWidth - ActualWindowWidth) / 2,
+                                  (ScreenHeight - ActualWindowHeight) / 2,
+                                  ActualWindowWidth,
+                                  ActualWindowHeight,
+                                  NULL,
+                                  NULL,
+                                  hInstance,
+                                  NULL);
+
+    if(WindowHandle == NULL)
+    {
+        Win32PrintErrorAndExit("CreateWindowEx");
+    }
+
+    DeviceContextHandle = GetDC(WindowHandle);
+    if(DeviceContextHandle == NULL)
+    {
+        Win32PrintErrorAndExit("GetDC");
+    }
+
+    int PixelFormatAttributeList[] = {
+        WGL_DRAW_TO_WINDOW_ARB, GL_TRUE,
+        WGL_SUPPORT_OPENGL_ARB, GL_TRUE,
+        WGL_DOUBLE_BUFFER_ARB, GL_TRUE,
+        WGL_PIXEL_TYPE_ARB, WGL_TYPE_RGBA_ARB,
+        WGL_COLOR_BITS_ARB, 32,
+        0
+    };
+
+    uint32_t NumPixelFormats;
+    wglChoosePixelFormatARB(DeviceContextHandle, PixelFormatAttributeList, 
+                            NULL, 1, &PixelFormat, &NumPixelFormats);
+
+    if(SetPixelFormat(DeviceContextHandle, PixelFormat, &PixelFormatDescriptor) == FALSE)
+    {
+        Win32PrintErrorAndExit("SetPixelFormat");
+    }
+
+    HGLRC DummyGLContextHandle = GLContextHandle;
+
+    int ContextAttributeList[] = {
+        WGL_CONTEXT_MAJOR_VERSION_ARB, 3,
+        WGL_CONTEXT_MINOR_VERSION_ARB, 0,
+        0
+    };
+
+    GLContextHandle = wglCreateContextAttribsARB(DeviceContextHandle, NULL, ContextAttributeList);
+
+    wglDeleteContext(DummyGLContextHandle);
+
+    if(wglMakeCurrent(DeviceContextHandle, GLContextHandle) == FALSE)
+    {
+        Win32PrintErrorAndExit("wglMakeCurrent");
+    }
+
+    GlobalDeviceContextHandle = DeviceContextHandle;
+    GlobalWindowHandle = WindowHandle;
+}
+
 inline static void
 glClearColor(color Color)
 {
@@ -226,30 +417,6 @@ GetUniformLocation(uint32_t ShaderProgram, char *UniformName)
     }
 
     return UniformLocation;
-}
-
-LRESULT CALLBACK
-WindowProc(HWND hwnd,
-           UINT uMsg,
-           WPARAM wParam,
-           LPARAM lParam)
-{
-    LRESULT Result = 0;
-
-    switch(uMsg)
-    {
-        case WM_CLOSE:
-        {
-            PostQuitMessage(0);
-        } break;
-
-        default:
-        {
-            Result = DefWindowProc(hwnd, uMsg, wParam, lParam);
-        } break;
-    }
-
-    return Result;
 }
 
 static void
@@ -535,172 +702,12 @@ WinMain(HINSTANCE hInstance,
     uint32_t ScreenWidth = 1920;
     uint32_t ScreenHeight = 1080;
 
-    WNDCLASS WindowClass = {};
-    WindowClass.style = CS_OWNDC;
-    WindowClass.lpfnWndProc = WindowProc;
-    WindowClass.hInstance = hInstance;
-    WindowClass.lpszClassName = "Window Class";
-    WindowClass.hCursor = LoadCursor(0, IDC_ARROW);
-
-    if(!RegisterClass(&WindowClass))
-    {
-        Win32PrintErrorAndExit("RegisterClass");
-    }
-
-    HWND WindowHandle = CreateWindowEx(0,
-                                       WindowClass.lpszClassName,
-                                       NULL,
-                                       0,
-                                       CW_USEDEFAULT,
-                                       CW_USEDEFAULT,
-                                       CW_USEDEFAULT,
-                                       CW_USEDEFAULT,
-                                       NULL,
-                                       NULL,
-                                       hInstance,
-                                       NULL);
-
-    if(WindowHandle == NULL)
-    {
-        Win32PrintErrorAndExit("Dummy CreateWindowEx");
-    }
-
-    HDC DeviceContextHandle = GetDC(WindowHandle);
-    if(DeviceContextHandle == NULL)
-    {
-        Win32PrintErrorAndExit("Dummy GetDC");
-    }
-
-    PIXELFORMATDESCRIPTOR PixelFormatDescriptor = {};
-    PixelFormatDescriptor.nSize = sizeof(PIXELFORMATDESCRIPTOR);
-    PixelFormatDescriptor.nVersion = 1;
-    PixelFormatDescriptor.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
-    PixelFormatDescriptor.iPixelType = PFD_TYPE_RGBA;
-    PixelFormatDescriptor.cColorBits = 32;
-    PixelFormatDescriptor.cDepthBits = 0;
-    PixelFormatDescriptor.cStencilBits = 0;
-    PixelFormatDescriptor.cAuxBuffers = 0;
-    PixelFormatDescriptor.iLayerType = PFD_MAIN_PLANE;
-
-    int PixelFormat = ChoosePixelFormat(DeviceContextHandle, &PixelFormatDescriptor);
-    if(!PixelFormat)
-    {
-        Win32PrintErrorAndExit("ChoosePixelFormat");
-    }
-
-    if(SetPixelFormat(DeviceContextHandle, PixelFormat, &PixelFormatDescriptor) == FALSE)
-    {
-        Win32PrintErrorAndExit("SetPixelFormat");
-    }
-
-    HGLRC GLContextHandle = wglCreateContext(DeviceContextHandle);
-    if(GLContextHandle == NULL)
-    {
-        Win32PrintErrorAndExit("wglCreateContext");
-    }
-
-    if(wglMakeCurrent(DeviceContextHandle, GLContextHandle) == FALSE)
-    {
-        Win32PrintErrorAndExit("wglMakeCurrent");
-    }
-
-    GLenum GlewInitStatusCode = glewInit();
-    if(GlewInitStatusCode != GLEW_OK)
-    {
-        ErrorExit("glewInit", (char *)glewGetErrorString(GlewInitStatusCode));
-    }
-
-    if(!WGLEW_ARB_pixel_format)
-    {
-        ErrorExit("WGL_ARB_pixel_format not supported");
-    }
-
-    if(!WGLEW_ARB_multisample)
-    {
-        ErrorExit("WGL_ARB_multisample not supported");
-    }
-
-    if(!WGLEW_ARB_create_context)
-    {
-        ErrorExit("WGL_ARB_create_context not supported");
-    }
-
-    DestroyWindow(WindowHandle);
-
-    RECT ClientRect = {0, 0, (LONG)WindowWidth, (LONG)WindowHeight};
-    AdjustWindowRect(&ClientRect, WS_OVERLAPPEDWINDOW, FALSE);
-
-    uint32_t ActualWindowWidth = ClientRect.right - ClientRect.left + 1;
-    uint32_t ActualWindowHeight = ClientRect.bottom - ClientRect.top + 1;
-
-    WindowHandle = CreateWindowEx(0,
-                                  WindowClass.lpszClassName,
-                                  "Window Text",
-                                  WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-                                  (ScreenWidth - ActualWindowWidth) / 2,
-                                  (ScreenHeight - ActualWindowHeight) / 2,
-                                  ActualWindowWidth,
-                                  ActualWindowHeight,
-                                  NULL,
-                                  NULL,
-                                  hInstance,
-                                  NULL);
-
-    if(WindowHandle == NULL)
-    {
-        Win32PrintErrorAndExit("CreateWindowEx");
-    }
-
-    DeviceContextHandle = GetDC(WindowHandle);
-    if(DeviceContextHandle == NULL)
-    {
-        Win32PrintErrorAndExit("GetDC");
-    }
-
-    int PixelFormatAttributeList[] = {
-        WGL_DRAW_TO_WINDOW_ARB, GL_TRUE,
-        WGL_SUPPORT_OPENGL_ARB, GL_TRUE,
-        WGL_DOUBLE_BUFFER_ARB, GL_TRUE,
-        WGL_PIXEL_TYPE_ARB, WGL_TYPE_RGBA_ARB,
-        WGL_COLOR_BITS_ARB, 32,
-        0
-    };
-
-    uint32_t NumPixelFormats;
-    wglChoosePixelFormatARB(DeviceContextHandle, PixelFormatAttributeList, 
-                            NULL, 1, &PixelFormat, &NumPixelFormats);
-
-    if(SetPixelFormat(DeviceContextHandle, PixelFormat, &PixelFormatDescriptor) == FALSE)
-    {
-        Win32PrintErrorAndExit("SetPixelFormat");
-    }
-
-    HGLRC DummyGLContextHandle = GLContextHandle;
-
-    int ContextAttributeList[] = {
-        WGL_CONTEXT_MAJOR_VERSION_ARB, 3,
-        WGL_CONTEXT_MINOR_VERSION_ARB, 0,
-        0
-    };
-
-    GLContextHandle = wglCreateContextAttribsARB(DeviceContextHandle, NULL, ContextAttributeList);
-
-    wglDeleteContext(DummyGLContextHandle);
-
-    if(wglMakeCurrent(DeviceContextHandle, GLContextHandle) == FALSE)
-    {
-        Win32PrintErrorAndExit("wglMakeCurrent");
-    }
-
-    GlobalDeviceContextHandle = DeviceContextHandle;
-
-    glEnable(GL_LINE_SMOOTH);
-    glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
-
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    Win32Init(hInstance, WindowWidth, WindowHeight, ScreenWidth, ScreenHeight);
 
     /* Begin application code. */
+
+    uint32_t FPS = 60;
+    uint32_t RenderDelayMillis = 1000 / FPS;
 
     app_state AppState = {};
     AppState.WindowWidth = WindowWidth;
@@ -708,9 +715,19 @@ WinMain(HINSTANCE hInstance,
     AppState.TimePointsCapacity = Megabytes(1) / sizeof(time_point);
     AppState.TimePoints = (time_point *)malloc(AppState.TimePointsCapacity * sizeof(time_point));
     AppState.PixelsPerSecond = (float)WindowWidth / 5.0f;
+    AppState.SingleFrameTime = (float)RenderDelayMillis / 1000.0f;
     SetColor(&AppState.ClearColor, 0.2f, 0.3f, 0.3f, 1.0f);
 
+    int LastMousePosX = 0;
+    bool IsTraceMode = false;
+    float TimeWhenExitedTraceMode = 0;
     float BasePixelsPerSecondDelta = 5.0f;
+
+    glEnable(GL_LINE_SMOOTH);
+    glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     glViewport(0, 0, WindowWidth, WindowHeight);
 
@@ -742,27 +759,18 @@ WinMain(HINSTANCE hInstance,
 
     glLineWidth(2.0f);
 
-    uint32_t RenderDelayMillis = 16;
-    SetTimer(WindowHandle, SCROLL_TIMER_ID, RenderDelayMillis, NULL);
-
-    AppState.SingleFrameTime = (float)RenderDelayMillis / 1000.0f;
-
-    bool IsTraceMode = false;
-    float TimeWhenExitedTraceMode = 0;
-
-    int LastMousePosX = 0;
-
-    AppState.StartTime = Win32GetCurrentTime();
-
-    /* IMGUI initialization. */
-
-    ImGui_CreateDeviceObjects();
-
-    // application init
+    // initialize IMGUI
     ImGuiIO& ImGuiIO = ImGui::GetIO();
-    ImGuiIO.DisplaySize.x = (float)WindowWidth;
-    ImGuiIO.DisplaySize.y = (float)WindowHeight;
-    ImGuiIO.RenderDrawListsFn = ImGui_RenderFunction;
+    {
+        ImGui_CreateDeviceObjects();
+
+        ImGuiIO.DisplaySize.x = (float)AppState.WindowWidth;
+        ImGuiIO.DisplaySize.y = (float)AppState.WindowHeight;
+        ImGuiIO.RenderDrawListsFn = ImGui_RenderFunction;
+    }
+
+    SetTimer(GlobalWindowHandle, SCROLL_TIMER_ID, RenderDelayMillis, NULL);
+    AppState.StartTime = Win32GetCurrentTime();
 
     MSG Message;
     while(GetMessage(&Message, NULL, 0, 0))
