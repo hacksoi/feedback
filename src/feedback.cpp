@@ -15,7 +15,25 @@
 
 #include "imgui/imgui.h"
 
+typedef int8_t int8;
+typedef int16_t int16;
+typedef int32_t int32;
+typedef int64_t int64;
+
+typedef uint8_t uint8;
+typedef uint16_t uint16;
+typedef uint32_t uint32;
+typedef uint64_t uint64;
+
+typedef float real32;
+typedef double real64;
+typedef int32_t bool32;
+
 #define local static
+#define global static
+
+#define ArrayCount(Array) (sizeof(Array)/sizeof(Array[0]))
+#define Assert(Expression) if(!(Expression)) { *((int *)0) = 0; }
 
 #define Kilobytes(NumberOfKbs) (NumberOfKbs * 1024)
 #define Megabytes(NumberOfMbs) (NumberOfMbs * 1024 * 1024)
@@ -33,24 +51,21 @@
     sprintf(GeneralBuffer, "min: %f, %f; max: %f, %f\n", Rect.Min.X, Rect.Min.Y, Rect.Max.X, Rect.Max.Y); \
     OutputDebugString(GeneralBuffer);
 
-#define ArrayCount(Array) (sizeof(Array)/sizeof(Array[0]))
-#define Assert(Expression) if(!(Expression)) { *((int *)0) = 0; }
-
 #define SCROLL_TIMER_ID 0
 
-static HDC GlobalDeviceContextHandle;
-static HWND GlobalWindowHandle;
+global HDC GlobalDeviceContextHandle;
+global HWND GlobalWindowHandle;
 
 union v4
 {
     struct
     {
-        float X, Y, Z, W;
+        real32 X, Y, Z, W;
     };
 
     struct
     {
-        float R, G, B, A;
+        real32 R, G, B, A;
     };
 };
 
@@ -58,11 +73,16 @@ struct v2
 {
     union
     {
-        float X;
-        float Time;
+        real32 X;
+        real32 Time;
     };
 
-    float Y;
+    real32 Y;
+};
+
+struct v2i
+{
+    int X, Y;
 };
 
 struct rectangle
@@ -72,33 +92,36 @@ struct rectangle
 
 struct app_state
 {
-    uint32_t WindowWidth;
-    uint32_t WindowHeight;
+    uint32 WindowWidth;
+    uint32 WindowHeight;
 
     v4 ClearColor;
 
-    uint32_t ShaderProgram;
-    uint32_t Vbo;
-    uint32_t Vao;
+    uint32 ShaderProgram;
+    uint32 Vbo;
+    uint32 Vao;
 
     v2 *TimePoints;
-    uint32_t TimePointsCapacity;
-    uint32_t TimePointsUsed;
-    uint32_t TimePointsInVbo;
+    uint32 TimePointsCapacity;
+    uint32 TimePointsUsed;
+    uint32 TimePointsInVbo;
 
-    float PixelsPerSecond, SecondsPerPixel;
-    float PixelsPerSecondFactor;
+    real32 PixelsPerSecond, SecondsPerPixel;
+    real32 PixelsPerSecondFactor;
 
+    real32 CameraTimePos;
+    real32 CameraTimePosDeltaPixels;
+
+    bool32 IsTraceMode;
+    real32 StartTime;
+    real32 SingleFrameTime;
+
+    uint32 NumFramesPassedSinceLastMouseMove;
+
+    // DEBUG
     rectangle ImGuiWindowRect;
-
-    float CameraTimePos;
-    float CameraTimePosDeltaPixels;
-
-    bool IsTraceMode;
-    float StartTime;
-    float SingleFrameTime;
-
-    uint32_t NumFramesPassedSinceLastMouseMove;
+    bool32 ShouldDrawPoints;
+    real32 TimeWhenExitedTraceMode;
 };
 
 static char *VertexShaderSource = R"STR(
@@ -144,7 +167,27 @@ static int          g_AttribLocationTex = 0, g_AttribLocationProjMtx = 0;
 static int          g_AttribLocationPosition = 0, g_AttribLocationUV = 0, g_AttribLocationColor = 0;
 static unsigned int g_VboHandle = 0, g_VaoHandle = 0, g_ElementsHandle = 0;
 
-/* Rectangle functions. */
+/* v2 functions */
+//{
+inline static v2
+V2(real32 X, real32 Y)
+{
+    v2 Result = {X, Y};
+    return Result;
+}
+//}
+
+/* v4 functions */
+//{
+inline static v4
+V4(real32 X, real32 Y, real32 Z, real32 W)
+{
+    v4 Result = {X, Y, Z, W};
+    return Result;
+}
+//}
+
+/* rectangle functions */
 //{
 inline static void
 RectangleResize(rectangle *Rectangle, v2 NewSize)
@@ -163,11 +206,18 @@ RectanglePosSize(rectangle *Rectangle, v2 Pos, v2 Size)
     Rectangle->Max.Y = Rectangle->Min.Y + Size.Y - 1;
 }
 
-inline static bool
+inline static bool32
 CheckInsideRectangle(v2 Point, rectangle Rectangle)
 {
-    bool Result = (Point.X >= Rectangle.Min.X && Point.X <= Rectangle.Max.X &&
+    bool32 Result = (Point.X >= Rectangle.Min.X && Point.X <= Rectangle.Max.X &&
                    Point.Y >= Rectangle.Min.Y && Point.Y <= Rectangle.Max.Y);
+    return Result;
+}
+
+inline static bool32
+CheckInsideRectangle(v2i Point, rectangle Rectangle)
+{
+    bool32 Result = CheckInsideRectangle(V2((real32)Point.X, (real32)Point.Y), Rectangle);
     return Result;
 }
 //}
@@ -208,7 +258,7 @@ Win32PrintErrorAndExit(char *FunctionName)
     ErrorExit(FunctionName, Buffer);
 }
 
-static float
+static real32
 Win32GetCurrentTime()
 {
     LARGE_INTEGER TimeLargeInteger;
@@ -217,15 +267,15 @@ Win32GetCurrentTime()
     LARGE_INTEGER Frequency;
     QueryPerformanceFrequency(&Frequency);
 
-    float Time = (float)TimeLargeInteger.QuadPart / (float)Frequency.QuadPart;
+    real32 Time = (real32)TimeLargeInteger.QuadPart / (real32)Frequency.QuadPart;
 
     return Time;
 }
 
-static float
-Win32GetElapsedTime(float StartTime)
+static real32
+Win32GetElapsedTime(real32 StartTime)
 {
-    float ElapsedTime = Win32GetCurrentTime() - StartTime;
+    real32 ElapsedTime = Win32GetCurrentTime() - StartTime;
     return ElapsedTime;
 }
 
@@ -255,8 +305,8 @@ WindowProc(HWND hwnd,
 
 static void
 Win32Init(HINSTANCE hInstance, 
-          uint32_t WindowWidth, uint32_t WindowHeight, 
-          uint32_t ScreenWidth, uint32_t ScreenHeight)
+          uint32 WindowWidth, uint32 WindowHeight, 
+          uint32 ScreenWidth, uint32 ScreenHeight)
 {
     WNDCLASS WindowClass = {};
     WindowClass.style = CS_OWNDC;
@@ -348,8 +398,8 @@ Win32Init(HINSTANCE hInstance,
     RECT ClientRect = {0, 0, (LONG)WindowWidth, (LONG)WindowHeight};
     AdjustWindowRect(&ClientRect, WS_OVERLAPPEDWINDOW, FALSE);
 
-    uint32_t ActualWindowWidth = ClientRect.right - ClientRect.left + 1;
-    uint32_t ActualWindowHeight = ClientRect.bottom - ClientRect.top + 1;
+    uint32 ActualWindowWidth = ClientRect.right - ClientRect.left + 1;
+    uint32 ActualWindowHeight = ClientRect.bottom - ClientRect.top + 1;
 
     WindowHandle = CreateWindowEx(0,
                                   WindowClass.lpszClassName,
@@ -384,7 +434,7 @@ Win32Init(HINSTANCE hInstance,
         0
     };
 
-    uint32_t NumPixelFormats;
+    uint32 NumPixelFormats;
     wglChoosePixelFormatARB(DeviceContextHandle, PixelFormatAttributeList, 
                             NULL, 1, &PixelFormat, &NumPixelFormats);
 
@@ -614,7 +664,7 @@ glClearColor(v4 Color)
 }
 
 inline static void
-SetColor(v4 *Color, float R, float G, float B, float A)
+SetColor(v4 *Color, real32 R, real32 G, real32 B, real32 A)
 {
     Color->R = R;
     Color->G = G;
@@ -626,7 +676,7 @@ typedef void check_function(GLuint object, GLenum name, GLint *params);
 typedef void get_info_function(GLuint object, GLsizei maxLength, GLsizei *length, GLchar *infoLog);
 static void
 CheckSuccess(check_function CheckFunction, get_info_function GetInfoFunction, 
-             uint32_t Object, GLenum QueryName, char *ExitMessage)
+             uint32 Object, GLenum QueryName, char *ExitMessage)
 {
     int Success;
     CheckFunction(Object, QueryName, &Success);
@@ -643,10 +693,10 @@ CheckSuccess(check_function CheckFunction, get_info_function GetInfoFunction,
     }
 }
 
-static uint32_t
+static uint32
 CreateShader(GLenum ShaderType, char *ShaderSource)
 {
-    uint32_t Shader = glCreateShader(ShaderType);
+    uint32 Shader = glCreateShader(ShaderType);
     glShaderSource(Shader, 1, &ShaderSource, NULL);
     glCompileShader(Shader);
 
@@ -664,10 +714,10 @@ CreateShader(GLenum ShaderType, char *ShaderSource)
     return Shader;
 }
 
-inline static int32_t
-GetUniformLocation(uint32_t ShaderProgram, char *UniformName)
+inline static int32
+GetUniformLocation(uint32 ShaderProgram, char *UniformName)
 {
-    int32_t UniformLocation = glGetUniformLocation(ShaderProgram, UniformName);
+    int32 UniformLocation = glGetUniformLocation(ShaderProgram, UniformName);
 
     if(UniformLocation == -1)
     {
@@ -679,7 +729,7 @@ GetUniformLocation(uint32_t ShaderProgram, char *UniformName)
 }
 
 inline static void
-PushTimePoint(app_state *AppState, float Time, float Y)
+PushTimePoint(app_state *AppState, real32 Time, real32 Y)
 {
     if(AppState->TimePointsUsed < AppState->TimePointsCapacity)
     {
@@ -691,13 +741,13 @@ PushTimePoint(app_state *AppState, float Time, float Y)
 }
 
 inline static void
-PushTimePoint(app_state *AppState, float Y)
+PushTimePoint(app_state *AppState, real32 Y)
 {
     PushTimePoint(AppState, Win32GetElapsedTime(AppState->StartTime), Y);
 }
 
 inline static void
-PushLastTimePoint(app_state *AppState, float Time)
+PushLastTimePoint(app_state *AppState, real32 Time)
 {
     if(AppState->TimePointsUsed > 0)
     {
@@ -719,13 +769,13 @@ HandleTraceModeMovement(app_state *AppState, int FlippedY)
         PushLastTimePoint(AppState, Win32GetElapsedTime(AppState->StartTime) - AppState->SingleFrameTime);
     }
 
-    PushTimePoint(AppState, (float)(AppState->WindowHeight - FlippedY));
+    PushTimePoint(AppState, (real32)(AppState->WindowHeight - FlippedY));
 
     AppState->NumFramesPassedSinceLastMouseMove = 0;
 }
 
 inline static void
-_SetPixelsPerSecond(app_state *AppState, float NewPixelsPerSecond)
+_SetPixelsPerSecond(app_state *AppState, real32 NewPixelsPerSecond)
 {
     AppState->PixelsPerSecond = NewPixelsPerSecond;
     if(AppState->PixelsPerSecond < 1)
@@ -749,13 +799,13 @@ DecreasePixelsPerSecond(app_state *AppState)
 }
 
 inline static void
-_SetCameraTimePos(app_state *AppState, float NewCameraTimePos)
+_SetCameraTimePos(app_state *AppState, real32 NewCameraTimePos)
 {
     AppState->CameraTimePos = NewCameraTimePos;
 }
 
 inline static void
-ChangeCameraTimePos(app_state *AppState, float CameraTimePosDeltaPixels)
+ChangeCameraTimePos(app_state *AppState, real32 CameraTimePosDeltaPixels)
 {
     _SetCameraTimePos(AppState, AppState->CameraTimePos + (AppState->SecondsPerPixel * CameraTimePosDeltaPixels));
 }
@@ -763,55 +813,64 @@ ChangeCameraTimePos(app_state *AppState, float CameraTimePosDeltaPixels)
 inline static void
 IncreaseCameraTimePos(app_state *AppState)
 {
-    float CameraTimePosDeltaSeconds = AppState->SecondsPerPixel * AppState->CameraTimePosDeltaPixels;
+    real32 CameraTimePosDeltaSeconds = AppState->SecondsPerPixel * AppState->CameraTimePosDeltaPixels;
     _SetCameraTimePos(AppState, AppState->CameraTimePos + CameraTimePosDeltaSeconds);
 }
 
 inline static void
 DecreaseCameraTimePos(app_state *AppState)
 {
-    float CameraTimePosDeltaSeconds = AppState->SecondsPerPixel * AppState->CameraTimePosDeltaPixels;
+    real32 CameraTimePosDeltaSeconds = AppState->SecondsPerPixel * AppState->CameraTimePosDeltaPixels;
     _SetCameraTimePos(AppState, AppState->CameraTimePos - CameraTimePosDeltaSeconds);
+}
+
+static void
+Reset(app_state *AppState)
+{
+    AppState->TimePointsUsed = 0;
+    AppState->TimePointsInVbo = 0;
+    AppState->StartTime = Win32GetCurrentTime();
+    AppState->NumFramesPassedSinceLastMouseMove = 0;
+    AppState->TimeWhenExitedTraceMode = 0;
+}
+
+static void
+Save(app_state *AppState)
+{
+    FILE *File = fopen("feedback_output.fbk", "wb");
+    if(File == NULL)
+    {
+        Win32PrintErrorAndExit("Save: fopen");
+    }
+
+    fwrite((void *)AppState->TimePoints, sizeof(v2), AppState->TimePointsCapacity, File);
+    fwrite((void *)&AppState->TimePointsUsed, sizeof(uint32), 1, File);
+    fwrite((void *)&AppState->TimePointsInVbo, sizeof(uint32), 1, File);
+    fclose(File);
+}
+
+static void
+Load(app_state *AppState)
+{
+    Reset(AppState);
+
+    FILE *File = fopen("feedback_output.fbk", "rb");
+    if(File == NULL)
+    {
+        Win32PrintErrorAndExit("Load: fopen");
+    }
+
+    fread((void *)AppState->TimePoints, sizeof(v2), AppState->TimePointsCapacity, File);
+    fread((void *)&AppState->TimePointsUsed, sizeof(uint32), 1, File);
+    fread((void *)&AppState->TimePointsInVbo, sizeof(uint32), 1, File);
+    fclose(File);
 }
 
 static void
 RedrawScreen(app_state *AppState)
 {
-    static bool ShouldDrawPoints = true;
-
-    ImGui::NewFrame();
-
-#if 1
-    v2 GuiWindowSize = {(float)AppState->WindowWidth / 2.1f, (float)AppState->WindowHeight / 8.0f};
-    v2 GuiWindowPos = {AppState->WindowWidth - GuiWindowSize.X, 0};
-
-    ImGui::SetNextWindowPos(ImVec2(GuiWindowPos.X, GuiWindowPos.Y));
-    ImGui::SetNextWindowSize(ImVec2(GuiWindowSize.X, GuiWindowSize.Y), ImGuiSetCond_Once);
-    if(ImGui::Begin("window", NULL, 0))
-    {
-        ImVec2 ImGuiWindowPosNative = ImGui::GetWindowPos();
-        ImVec2 ImGuiWindowSizeNative = ImGui::GetWindowSize();
-        v2 ImGuiWindowPos = {(float)ImGuiWindowPosNative.x, (float)ImGuiWindowPosNative.y};
-        v2 ImGuiWindowSize = {(float)ImGuiWindowSizeNative.x, (float)ImGuiWindowSizeNative.y};
-        RectanglePosSize(&AppState->ImGuiWindowRect, ImGuiWindowPos, ImGuiWindowSize);
-
-        ImGui::Value("PixelsPerSecond", AppState->PixelsPerSecond);
-        local float TraceModeElapsedTime = 0;
-        if(AppState->IsTraceMode)
-        {
-            TraceModeElapsedTime = Win32GetCurrentTime() - AppState->StartTime;
-        }
-        ImGui::Value("TraceModeElapsedTime", TraceModeElapsedTime);
-        ImGui::Value("CameraTimePos", AppState->CameraTimePos);
-        ImGui::Checkbox("Draw Points", &ShouldDrawPoints);
-    }
-    ImGui::End();
-#else
-    ImGui::ShowTestWindow();
-#endif
-
-    float HalfWindowWidth = (float)AppState->WindowWidth / 2.0f;
-    float CameraTimePosCentered = AppState->CameraTimePos - (AppState->SecondsPerPixel * HalfWindowWidth);
+    real32 HalfWindowWidth = (real32)AppState->WindowWidth / 2.0f;
+    real32 CameraTimePosCentered = AppState->CameraTimePos - (AppState->SecondsPerPixel * HalfWindowWidth);
     glUniform1f(GetUniformLocation(AppState->ShaderProgram, "CameraTimePos"), CameraTimePosCentered);
     glUniform1f(GetUniformLocation(AppState->ShaderProgram, "PixelsPerSecond"), AppState->PixelsPerSecond);
 
@@ -824,7 +883,7 @@ RedrawScreen(app_state *AppState)
     glUniform4f(GetUniformLocation(AppState->ShaderProgram, "ShapeColor"), 1.0f, 0.5f, 0.2f, 1.0f);
     glDrawArrays(GL_LINE_STRIP, 0, AppState->TimePointsInVbo + 1);
 
-    if(ShouldDrawPoints)
+    if(AppState->ShouldDrawPoints)
     {
         glUniform4f(GetUniformLocation(AppState->ShaderProgram, "ShapeColor"), 1.0f, 1.0f, 1.0f, 1.0f);
         glDrawArrays(GL_POINTS, 0, AppState->TimePointsInVbo + 1);
@@ -841,33 +900,32 @@ WinMain(HINSTANCE hInstance,
         LPSTR lpCmdLine,
         int nCmdShow)
 {
-    uint32_t WindowWidth = 540;
-    uint32_t WindowHeight = 960;
+    uint32 WindowWidth = 540;
+    uint32 WindowHeight = 960;
 
-    uint32_t ScreenWidth = 1920;
-    uint32_t ScreenHeight = 1080;
+    uint32 ScreenWidth = 1920;
+    uint32 ScreenHeight = 1080;
 
     Win32Init(hInstance, WindowWidth, WindowHeight, ScreenWidth, ScreenHeight);
 
     /* Begin application code. */
 
-    uint32_t FPS = 60;
-    uint32_t RenderDelayMillis = 1000 / FPS;
+    uint32 FPS = 60;
+    uint32 RenderDelayMillis = 1000 / FPS;
 
     app_state AppState = {};
     AppState.WindowWidth = WindowWidth;
     AppState.WindowHeight = WindowHeight;
     AppState.TimePointsCapacity = Megabytes(1) / sizeof(v2);
     AppState.TimePoints = (v2 *)malloc(AppState.TimePointsCapacity * sizeof(v2));
-    AppState.PixelsPerSecond = (float)WindowWidth / 5.0f;
+    AppState.PixelsPerSecond = (real32)WindowWidth / 5.0f;
     AppState.SecondsPerPixel = 1.0f / AppState.PixelsPerSecond;
     AppState.PixelsPerSecondFactor = 1.1f;
-    AppState.SingleFrameTime = (float)RenderDelayMillis / 1000.0f;
+    AppState.SingleFrameTime = (real32)RenderDelayMillis / 1000.0f;
     AppState.CameraTimePosDeltaPixels = 15.0f;
     SetColor(&AppState.ClearColor, 0.2f, 0.3f, 0.3f, 1.0f);
 
     int LastMousePosX = 0;
-    float TimeWhenExitedTraceMode = 0;
 
     glEnable(GL_LINE_SMOOTH);
     glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
@@ -877,8 +935,8 @@ WinMain(HINSTANCE hInstance,
 
     glViewport(0, 0, WindowWidth, WindowHeight);
 
-    uint32_t VertexShader = CreateShader(GL_VERTEX_SHADER, VertexShaderSource);
-    uint32_t FragmentShader = CreateShader(GL_FRAGMENT_SHADER, FragmentShaderSource);
+    uint32 VertexShader = CreateShader(GL_VERTEX_SHADER, VertexShaderSource);
+    uint32 FragmentShader = CreateShader(GL_FRAGMENT_SHADER, FragmentShaderSource);
 
     AppState.ShaderProgram = glCreateProgram();
     glAttachShader(AppState.ShaderProgram, VertexShader);
@@ -891,7 +949,7 @@ WinMain(HINSTANCE hInstance,
     glDeleteShader(FragmentShader);
 
     glUseProgram(AppState.ShaderProgram);
-    glUniform2f(GetUniformLocation(AppState.ShaderProgram, "WindowDimensions"), (float)WindowWidth, (float)WindowHeight);
+    glUniform2f(GetUniformLocation(AppState.ShaderProgram, "WindowDimensions"), (real32)WindowWidth, (real32)WindowHeight);
 
     glGenBuffers(1, &AppState.Vbo);
     glBindBuffer(GL_ARRAY_BUFFER, AppState.Vbo);
@@ -910,8 +968,8 @@ WinMain(HINSTANCE hInstance,
     ImGui_CreateDeviceObjects();
 
     ImGuiIO& ImGuiIO = ImGui::GetIO();
-    ImGuiIO.DisplaySize.x = (float)AppState.WindowWidth;
-    ImGuiIO.DisplaySize.y = (float)AppState.WindowHeight;
+    ImGuiIO.DisplaySize.x = (real32)AppState.WindowWidth;
+    ImGuiIO.DisplaySize.y = (real32)AppState.WindowHeight;
     ImGuiIO.RenderDrawListsFn = ImGui_RenderFunction;
 
     ImGuiIO.KeyMap[ImGuiKey_Tab] = VK_TAB;
@@ -934,8 +992,6 @@ WinMain(HINSTANCE hInstance,
     ImGuiIO.KeyMap[ImGuiKey_Y] = 'Y';
     ImGuiIO.KeyMap[ImGuiKey_Z] = 'Z';
 
-    bool IsShiftDown = false;
-
     SetTimer(GlobalWindowHandle, SCROLL_TIMER_ID, RenderDelayMillis, NULL);
     AppState.StartTime = Win32GetCurrentTime();
 
@@ -948,11 +1004,11 @@ WinMain(HINSTANCE hInstance,
         {
             case WM_LBUTTONDOWN:
             {
-                v2 DownPoint = {(float)GET_X_LPARAM(Message.lParam), (float)GET_Y_LPARAM(Message.lParam)};
+                v2i DownPoint = {GET_X_LPARAM(Message.lParam), GET_Y_LPARAM(Message.lParam)};
                 if(!CheckInsideRectangle(DownPoint, AppState.ImGuiWindowRect))
                 {
-                    AppState.StartTime = Win32GetCurrentTime() - TimeWhenExitedTraceMode;
-                    HandleTraceModeMovement(&AppState, GET_Y_LPARAM(Message.lParam));
+                    AppState.StartTime = Win32GetElapsedTime(AppState.TimeWhenExitedTraceMode);
+                    HandleTraceModeMovement(&AppState, DownPoint.Y);
                     AppState.IsTraceMode = true;
                 }
 
@@ -963,7 +1019,7 @@ WinMain(HINSTANCE hInstance,
             {
                 if(AppState.IsTraceMode)
                 {
-                    TimeWhenExitedTraceMode = Win32GetElapsedTime(AppState.StartTime);
+                    AppState.TimeWhenExitedTraceMode = Win32GetElapsedTime(AppState.StartTime);
                     AppState.IsTraceMode = false;
                 }
 
@@ -985,35 +1041,29 @@ WinMain(HINSTANCE hInstance,
 
             case WM_MOUSEMOVE:
             {
-                int MousePosX = GET_X_LPARAM(Message.lParam);
-
+                v2i MouseMovePoint = {GET_X_LPARAM(Message.lParam), GET_Y_LPARAM(Message.lParam)};
                 if(AppState.IsTraceMode)
                 {
-                    HandleTraceModeMovement(&AppState, GET_Y_LPARAM(Message.lParam));
+                    HandleTraceModeMovement(&AppState, MouseMovePoint.Y);
                 }
                 else//if(!AppState.IsTraceMode)
                 {
                     if(Message.wParam & MK_RBUTTON)
                     {
-                        int MouseDeltaX = MousePosX - LastMousePosX;
-                        ChangeCameraTimePos(&AppState, (float)(-MouseDeltaX));
+                        int MouseDeltaX = MouseMovePoint.X - LastMousePosX;
+                        ChangeCameraTimePos(&AppState, (real32)(-MouseDeltaX));
                     }
                 }
 
-                LastMousePosX = MousePosX;
+                LastMousePosX = MouseMovePoint.X;
 
-                ImGuiIO.MousePos = ImVec2((float)GET_X_LPARAM(Message.lParam), (float)GET_Y_LPARAM(Message.lParam));
+                ImGuiIO.MousePos = ImVec2((real32)MouseMovePoint.X, (real32)MouseMovePoint.Y);
             } break;
 
             case WM_KEYDOWN:
             {
                 switch(Message.wParam)
                 {
-                    case VK_SHIFT:
-                    {
-                        IsShiftDown = true;
-                    } break;
-
                     case VK_UP:
                     {
                         IncreasePixelsPerSecond(&AppState);
@@ -1089,45 +1139,89 @@ WinMain(HINSTANCE hInstance,
 
             case WM_KEYUP:
             {
-                switch(Message.wParam)
-                {
-                    case VK_SHIFT:
-                    {
-                        IsShiftDown = false;
-                    } break;
-                }
-
                 ImGuiIO.KeysDown[Message.wParam] = false;
             } break;
 
             case WM_TIMER:
             {
-                if(AppState.IsTraceMode && 
-                   Message.wParam == SCROLL_TIMER_ID)
+                if(Message.wParam == SCROLL_TIMER_ID)
                 {
-                    if(AppState.TimePointsUsed > 0)
+                    if(AppState.IsTraceMode)
                     {
-                        // add dummy time point
-                        PushTimePoint(&AppState, Win32GetElapsedTime(AppState.StartTime), AppState.TimePoints[AppState.TimePointsUsed - 1].Y);
+                        if(AppState.TimePointsUsed > 0)
+                        {
+                            // add dummy time point
+                            PushTimePoint(&AppState, Win32GetElapsedTime(AppState.StartTime), AppState.TimePoints[AppState.TimePointsUsed - 1].Y);
 
-                        uint32_t CopyOffset = AppState.TimePointsInVbo * sizeof(v2);
-                        uint32_t NumBytesToCopy = (AppState.TimePointsUsed - AppState.TimePointsInVbo + 1) * sizeof(v2);
+                            uint32 CopyOffset = AppState.TimePointsInVbo * sizeof(v2);
+                            uint32 NumBytesToCopy = (AppState.TimePointsUsed - AppState.TimePointsInVbo + 1) * sizeof(v2);
 
-                        glBindBuffer(GL_ARRAY_BUFFER, AppState.Vbo);
-                        glBufferSubData(GL_ARRAY_BUFFER, CopyOffset, NumBytesToCopy, &AppState.TimePoints[AppState.TimePointsInVbo]);
+                            glBindBuffer(GL_ARRAY_BUFFER, AppState.Vbo);
+                            glBufferSubData(GL_ARRAY_BUFFER, CopyOffset, NumBytesToCopy, &AppState.TimePoints[AppState.TimePointsInVbo]);
 
-                        // remove dummy time point
-                        PopTimePoint(&AppState);
+                            // remove dummy time point
+                            PopTimePoint(&AppState);
 
-                        AppState.TimePointsInVbo = AppState.TimePointsUsed;
+                            AppState.TimePointsInVbo = AppState.TimePointsUsed;
+                        }
+
+                        AppState.NumFramesPassedSinceLastMouseMove++;
+
+                        AppState.CameraTimePos = Win32GetElapsedTime(AppState.StartTime);
                     }
 
-                    AppState.NumFramesPassedSinceLastMouseMove++;
+                    ImGui::NewFrame();
+#if 1
+                    v2 GuiWindowSize = {(real32)AppState.WindowWidth / 2.1f, (real32)AppState.WindowHeight / 7.0f};
+                    v2 GuiWindowPos = {AppState.WindowWidth - GuiWindowSize.X, 0};
 
-                    AppState.CameraTimePos = Win32GetElapsedTime(AppState.StartTime);
+                    ImGui::SetNextWindowPos(ImVec2(GuiWindowPos.X, GuiWindowPos.Y));
+                    ImGui::SetNextWindowSize(ImVec2(GuiWindowSize.X, GuiWindowSize.Y), ImGuiSetCond_Once);
+                    if(ImGui::Begin("window", NULL, 0))
+                    {
+                        ImVec2 ImGuiWindowPosNative = ImGui::GetWindowPos();
+                        ImVec2 ImGuiWindowSizeNative = ImGui::GetWindowSize();
+                        v2 ImGuiWindowPos = {(real32)ImGuiWindowPosNative.x, (real32)ImGuiWindowPosNative.y};
+                        v2 ImGuiWindowSize = {(real32)ImGuiWindowSizeNative.x, (real32)ImGuiWindowSizeNative.y};
+                        RectanglePosSize(&AppState.ImGuiWindowRect, ImGuiWindowPos, ImGuiWindowSize);
+
+                        ImGui::Value("PixelsPerSecond", AppState.PixelsPerSecond);
+
+                        local real32 TraceModeElapsedTime = 0;
+                        if(AppState.IsTraceMode)
+                        {
+                            TraceModeElapsedTime = Win32GetElapsedTime(AppState.StartTime);
+                        }
+
+                        ImGui::Value("TraceModeElapsedTime", TraceModeElapsedTime);
+                        ImGui::Value("CameraTimePos", AppState.CameraTimePos);
+                        ImGui::Checkbox("Draw Points", (bool *)&AppState.ShouldDrawPoints);
+
+                        if(ImGui::Button("New"))
+                        {
+                            Reset(&AppState);
+                        }
+                        ImGui::SameLine();
+
+                        if(ImGui::Button("Save"))
+                        {
+                            Save(&AppState);
+                        }
+                        ImGui::SameLine();
+
+                        if(ImGui::Button("Load"))
+                        {
+                            Load(&AppState);
+                        }
+                        ImGui::SameLine();
+                    }
+                    ImGui::End();
+#else
+                    ImGui::ShowTestWindow();
+#endif
+
+                    RedrawScreen(&AppState);
                 }
-
-                RedrawScreen(&AppState);
             } break;
 
             default:
