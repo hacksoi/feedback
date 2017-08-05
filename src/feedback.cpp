@@ -30,6 +30,7 @@ typedef int32_t bool32;
 
 #define local static
 #define global static
+#define internal static
 
 #define ArrayCount(Array) (sizeof(Array)/sizeof(Array[0]))
 #define Assert(Expression) if(!(Expression)) { *((int *)0) = 0; }
@@ -52,10 +53,15 @@ typedef int32_t bool32;
 
 #define SCROLL_TIMER_ID 0
 
-global HDC GlobalDeviceContextHandle;
-global HWND GlobalWindowHandle;
+/* enums and structs */
+//{
+enum app_mode
+{
+    AppMode_TRACE,
+    AppMode_PAUSED,
+    AppMode_PLAYBACK
+};
 
-/* structs */
 union v4
 {
     struct
@@ -90,13 +96,6 @@ struct rectangle
     v2 Min, Max;
 };
 
-enum app_mode
-{
-    AppMode_TRACE,
-    AppMode_PAUSED,
-    AppMode_PLAYBACK
-};
-
 struct app_state
 {
     uint32 WindowWidth;
@@ -112,6 +111,7 @@ struct app_state
     uint32 TimePointsCapacity;
     uint32 TimePointsUsed;
     uint32 TimePointsInVbo;
+    uint32 RealTimePointsInVbo;
 
     real32 PixelsPerSecond, SecondsPerPixel;
     real32 PixelsPerSecondFactor;
@@ -129,8 +129,11 @@ struct app_state
     bool32 ShouldDrawPoints;
     uint64 TimeElapsedWhenExitedTraceMode;
 };
+//}
 
-static char *VertexShaderSource = R"STR(
+/* shaders */
+//{
+global char *VertexShaderSource = R"STR(
 #version 330 core
 layout (location = 0) in vec2 Pos;
 
@@ -151,7 +154,7 @@ main()
 }
 )STR";
 
-static char *FragmentShaderSource = R"STR(
+global char *FragmentShaderSource = R"STR(
 #version 330 core
 out vec4 FragColor;
 
@@ -163,21 +166,29 @@ main()
     FragColor = ShapeColor;
 }
 )STR";
+//}
 
 /* global variables */
-static char GeneralBuffer[512];
-static uint64 GlobalPerfCountFrequency;
+//{
+global char GeneralBuffer[512];
 
-/* IMGUI */
-static GLuint       g_FontTexture = 0;
-static int          g_ShaderHandle = 0, g_VertHandle = 0, g_FragHandle = 0;
-static int          g_AttribLocationTex = 0, g_AttribLocationProjMtx = 0;
-static int          g_AttribLocationPosition = 0, g_AttribLocationUV = 0, g_AttribLocationColor = 0;
-static unsigned int g_VboHandle = 0, g_VaoHandle = 0, g_ElementsHandle = 0;
+global uint64 GlobalPerfCountFrequency;
+global HDC GlobalDeviceContextHandle;
+global HWND GlobalWindowHandle;
+//}
+
+/* imgui */
+//{
+internal GLuint       g_FontTexture = 0;
+internal int          g_ShaderHandle = 0, g_VertHandle = 0, g_FragHandle = 0;
+internal int          g_AttribLocationTex = 0, g_AttribLocationProjMtx = 0;
+internal int          g_AttribLocationPosition = 0, g_AttribLocationUV = 0, g_AttribLocationColor = 0;
+internal unsigned int g_VboHandle = 0, g_VaoHandle = 0, g_ElementsHandle = 0;
+//}
 
 /* v2 functions */
 //{
-inline static v2
+inline internal v2
 V2(real32 X, real32 Y)
 {
     v2 Result = {X, Y};
@@ -187,7 +198,7 @@ V2(real32 X, real32 Y)
 
 /* v4 functions */
 //{
-inline static v4
+inline internal v4
 V4(real32 X, real32 Y, real32 Z, real32 W)
 {
     v4 Result = {X, Y, Z, W};
@@ -197,14 +208,14 @@ V4(real32 X, real32 Y, real32 Z, real32 W)
 
 /* rectangle functions */
 //{
-inline static void
+inline internal void
 RectangleResize(rectangle *Rectangle, v2 NewSize)
 {
     Rectangle->Max.X = Rectangle->Min.X + NewSize.X - 1;
     Rectangle->Max.Y = Rectangle->Min.Y + NewSize.Y - 1;
 }
 
-inline static void
+inline internal void
 RectanglePosSize(rectangle *Rectangle, v2 Pos, v2 Size)
 {
     Rectangle->Min.X = Pos.X;
@@ -214,7 +225,7 @@ RectanglePosSize(rectangle *Rectangle, v2 Pos, v2 Size)
     Rectangle->Max.Y = Rectangle->Min.Y + Size.Y - 1;
 }
 
-inline static bool32
+inline internal bool32
 CheckInsideRectangle(v2 Point, rectangle Rectangle)
 {
     bool32 Result = (Point.X >= Rectangle.Min.X && Point.X <= Rectangle.Max.X &&
@@ -222,7 +233,7 @@ CheckInsideRectangle(v2 Point, rectangle Rectangle)
     return Result;
 }
 
-inline static bool32
+inline internal bool32
 CheckInsideRectangle(v2i Point, rectangle Rectangle)
 {
     bool32 Result = CheckInsideRectangle(V2((real32)Point.X, (real32)Point.Y), Rectangle);
@@ -232,14 +243,14 @@ CheckInsideRectangle(v2i Point, rectangle Rectangle)
 
 /* util */
 //{
-inline static void
+inline internal void
 ErrorExit(char *Message)
 {
     Printf("%s\n", Message);
     ExitProcess(1);
 }
 
-inline static void
+inline internal void
 ErrorExit(char *FunctionName, char *Reason)
 {
     Printf("Error in %s(): %s\n", FunctionName, Reason);
@@ -249,7 +260,7 @@ ErrorExit(char *FunctionName, char *Reason)
 
 /* win32 */
 //{
-static void
+internal void
 Win32PrintErrorAndExit(char *FunctionName)
 {
     DWORD ErrorCode = GetLastError();
@@ -310,7 +321,7 @@ WindowProc(HWND hwnd,
     return Result;
 }
 
-static void
+internal void
 Win32Init(HINSTANCE hInstance, 
           uint32 WindowWidth, uint32 WindowHeight, 
           uint32 ScreenWidth, uint32 ScreenHeight)
@@ -485,7 +496,7 @@ Win32Init(HINSTANCE hInstance,
 
 /* IMGUI */
 //{ 
-static void
+internal void
 ImGui_CreateDeviceObjects()
 {
     // Backup GL state
@@ -572,7 +583,7 @@ ImGui_CreateDeviceObjects()
     glBindVertexArray(last_vertex_array);
 }
 
-static void
+internal void
 ImGui_RenderFunction(ImDrawData* draw_data)
 {
     // Avoid rendering when minimized, scale coordinates for retina displays (screen coordinates != framebuffer coordinates)
@@ -674,13 +685,13 @@ ImGui_RenderFunction(ImDrawData* draw_data)
 
 /* opengl */
 //{
-inline static void
+inline internal void
 glClearColor(v4 Color)
 {
     glClearColor(Color.R, Color.G, Color.B, Color.A);
 }
 
-inline static void
+inline internal void
 SetColor(v4 *Color, real32 R, real32 G, real32 B, real32 A)
 {
     Color->R = R;
@@ -691,7 +702,7 @@ SetColor(v4 *Color, real32 R, real32 G, real32 B, real32 A)
 
 typedef void check_function(GLuint object, GLenum name, GLint *params);
 typedef void get_info_function(GLuint object, GLsizei maxLength, GLsizei *length, GLchar *infoLog);
-static void
+internal void
 CheckSuccess(check_function CheckFunction, get_info_function GetInfoFunction, 
              uint32 Object, GLenum QueryName, char *ExitMessage)
 {
@@ -710,7 +721,7 @@ CheckSuccess(check_function CheckFunction, get_info_function GetInfoFunction,
     }
 }
 
-static uint32
+internal uint32
 CreateShader(GLenum ShaderType, char *ShaderSource)
 {
     uint32 Shader = glCreateShader(ShaderType);
@@ -731,7 +742,7 @@ CreateShader(GLenum ShaderType, char *ShaderSource)
     return Shader;
 }
 
-inline static int32
+inline internal int32
 GetUniformLocation(uint32 ShaderProgram, char *UniformName)
 {
     int32 UniformLocation = glGetUniformLocation(ShaderProgram, UniformName);
@@ -748,7 +759,15 @@ GetUniformLocation(uint32 ShaderProgram, char *UniformName)
 
 /* application */
 //{
-inline static void
+inline internal bool32
+CheckVboNeedsToBeUpdated(app_state *AppState)
+{
+    Assert(AppState->RealTimePointsInVbo <= AppState->TimePointsUsed);
+    bool32 NeedsToBeUpdated = AppState->RealTimePointsInVbo < AppState->TimePointsUsed;
+    return NeedsToBeUpdated;
+}
+
+inline internal void
 PushTimePoint(app_state *AppState, real32 Time, real32 Y)
 {
     if(AppState->TimePointsUsed < AppState->TimePointsCapacity)
@@ -760,19 +779,19 @@ PushTimePoint(app_state *AppState, real32 Time, real32 Y)
     }
 }
 
-inline static void
+inline internal void
 PushLastTimePoint(app_state *AppState, real32 Time)
 {
     PushTimePoint(AppState, Time, AppState->TimePoints[AppState->TimePointsUsed - 1].Y);
 }
 
-inline static void
+inline internal void
 PopTimePoint(app_state *AppState)
 {
     AppState->TimePointsUsed--;
 }
 
-static void
+internal void
 HandleTraceModeMovement(app_state *AppState, int FlippedY)
 {
     if(AppState->TimePointsUsed > 0)
@@ -788,7 +807,7 @@ HandleTraceModeMovement(app_state *AppState, int FlippedY)
     PushTimePoint(AppState, Win32GetSecondsElapsed(AppState->StartTime), (real32)(AppState->WindowHeight - FlippedY));
 }
 
-inline static void
+inline internal void
 _SetPixelsPerSecond(app_state *AppState, real32 NewPixelsPerSecond)
 {
     AppState->PixelsPerSecond = NewPixelsPerSecond;
@@ -796,67 +815,50 @@ _SetPixelsPerSecond(app_state *AppState, real32 NewPixelsPerSecond)
     {
         AppState->PixelsPerSecond = 1;
     }
-
     AppState->SecondsPerPixel = 1.0f / AppState->PixelsPerSecond;
 }
 
-inline static void
+inline internal void
 IncreasePixelsPerSecond(app_state *AppState)
 {
     _SetPixelsPerSecond(AppState, AppState->PixelsPerSecond * AppState->PixelsPerSecondFactor);
 }
 
-inline static void
+inline internal void
 DecreasePixelsPerSecond(app_state *AppState)
 {
     _SetPixelsPerSecond(AppState, AppState->PixelsPerSecond / AppState->PixelsPerSecondFactor);
 }
 
-inline static void
+inline internal void
 _SetCameraTimePos(app_state *AppState, real32 NewCameraTimePos)
 {
     AppState->CameraTimePos = NewCameraTimePos;
 }
 
-inline static void
+inline internal void
 ChangeCameraTimePos(app_state *AppState, real32 CameraTimePosDeltaPixels)
 {
     _SetCameraTimePos(AppState, AppState->CameraTimePos + (AppState->SecondsPerPixel * CameraTimePosDeltaPixels));
 }
 
-inline static void
+inline internal void
 IncreaseCameraTimePos(app_state *AppState)
 {
     real32 CameraTimePosDeltaSeconds = AppState->SecondsPerPixel * AppState->CameraTimePosDeltaPixels;
     _SetCameraTimePos(AppState, AppState->CameraTimePos + CameraTimePosDeltaSeconds);
 }
 
-inline static void
+inline internal void
 DecreaseCameraTimePos(app_state *AppState)
 {
     real32 CameraTimePosDeltaSeconds = AppState->SecondsPerPixel * AppState->CameraTimePosDeltaPixels;
     _SetCameraTimePos(AppState, AppState->CameraTimePos - CameraTimePosDeltaSeconds);
 }
 
-static void
+internal void
 RedrawScreen(app_state *AppState)
 {
-    if(AppState->TimePointsInVbo != AppState->TimePointsUsed)
-    {
-        PushLastTimePoint(AppState, Win32GetSecondsElapsed(AppState->StartTime));
-
-        uint32 CopyOffset = AppState->TimePointsInVbo * sizeof(v2);
-        uint32 NumBytesToCopy = (AppState->TimePointsUsed - AppState->TimePointsInVbo) * sizeof(v2);
-
-        glBindBuffer(GL_ARRAY_BUFFER, AppState->Vbo);
-        glBufferSubData(GL_ARRAY_BUFFER, CopyOffset, NumBytesToCopy, 
-                        &AppState->TimePoints[AppState->TimePointsInVbo]);
-
-        PopTimePoint(AppState);
-
-        AppState->TimePointsInVbo = AppState->TimePointsUsed;
-    }
-
     real32 HalfWindowWidth = (real32)AppState->WindowWidth / 2.0f;
     real32 CameraTimePosCentered = AppState->CameraTimePos - (AppState->SecondsPerPixel * HalfWindowWidth);
     glUniform1f(GetUniformLocation(AppState->ShaderProgram, "CameraTimePos"), CameraTimePosCentered);
@@ -869,12 +871,12 @@ RedrawScreen(app_state *AppState)
     glBindVertexArray(AppState->Vao);
 
     glUniform4f(GetUniformLocation(AppState->ShaderProgram, "ShapeColor"), 1.0f, 0.5f, 0.2f, 1.0f);
-    glDrawArrays(GL_LINE_STRIP, 0, AppState->TimePointsInVbo + 1);
+    glDrawArrays(GL_LINE_STRIP, 0, AppState->TimePointsInVbo);
 
     if(AppState->ShouldDrawPoints)
     {
         glUniform4f(GetUniformLocation(AppState->ShaderProgram, "ShapeColor"), 1.0f, 1.0f, 1.0f, 1.0f);
-        glDrawArrays(GL_POINTS, 0, AppState->TimePointsInVbo + 1);
+        glDrawArrays(GL_POINTS, 0, AppState->TimePointsInVbo);
     }
 
     ImGui::Render();
@@ -882,16 +884,17 @@ RedrawScreen(app_state *AppState)
     SwapBuffers(GlobalDeviceContextHandle);
 }
 
-static void
+internal void
 Reset(app_state *AppState)
 {
     AppState->TimePointsUsed = 0;
     AppState->TimePointsInVbo = 0;
+    AppState->RealTimePointsInVbo = 0;
     AppState->StartTime = Win32GetCurrentTime();
     AppState->TimeElapsedWhenExitedTraceMode = 0;
 }
 
-static void
+internal void
 Save(app_state *AppState)
 {
     FILE *File = fopen("feedback_output.fbk", "wb");
@@ -902,11 +905,10 @@ Save(app_state *AppState)
 
     fwrite((void *)AppState->TimePoints, sizeof(v2), AppState->TimePointsCapacity, File);
     fwrite((void *)&AppState->TimePointsUsed, sizeof(uint32), 1, File);
-    fwrite((void *)&AppState->TimePointsInVbo, sizeof(uint32), 1, File);
     fclose(File);
 }
 
-static void
+internal void
 Load(app_state *AppState)
 {
     FILE *File = fopen("feedback_output.fbk", "rb");
@@ -917,10 +919,9 @@ Load(app_state *AppState)
 
     fread((void *)AppState->TimePoints, sizeof(v2), AppState->TimePointsCapacity, File);
     fread((void *)&AppState->TimePointsUsed, sizeof(uint32), 1, File);
-    fread((void *)&AppState->TimePointsInVbo, sizeof(uint32), 1, File);
     fclose(File);
 
-    AppState->TimePointsInVbo = 0;
+    AppState->RealTimePointsInVbo = AppState->TimePointsInVbo = 0;
 }
 //}
 
@@ -1076,7 +1077,7 @@ WinMain(HINSTANCE hInstance,
                 {
                     HandleTraceModeMovement(&AppState, MouseMovePoint.Y);
                 }
-                else//if(!AppState.IsTraceMode)
+                else
                 {
                     if(Message.wParam & MK_RBUTTON)
                     {
@@ -1162,6 +1163,33 @@ WinMain(HINSTANCE hInstance,
                     if(AppState.IsTraceMode)
                     {
                         AppState.CameraTimePos = Win32GetSecondsElapsed(AppState.StartTime);
+                    }
+
+                    // update vertex buffer
+                    {
+                        if(AppState.IsTraceMode)
+                        {
+                            PushLastTimePoint(&AppState, Win32GetSecondsElapsed(AppState.StartTime));
+                        }
+
+                        if(CheckVboNeedsToBeUpdated(&AppState))
+                        {
+                            uint32 ByteOffsetInVbo = AppState.RealTimePointsInVbo * sizeof(v2);
+                            uint32 NumBytesToCopy = (AppState.TimePointsUsed - AppState.RealTimePointsInVbo) * sizeof(v2);
+
+                            glBindBuffer(GL_ARRAY_BUFFER, AppState.Vbo);
+                            glBufferSubData(GL_ARRAY_BUFFER, ByteOffsetInVbo, NumBytesToCopy, 
+                                            &AppState.TimePoints[AppState.RealTimePointsInVbo]);
+
+                            AppState.RealTimePointsInVbo = AppState.TimePointsInVbo = AppState.TimePointsUsed;
+                        }
+
+                        if(AppState.IsTraceMode)
+                        {
+                            PopTimePoint(&AppState);
+
+                            AppState.RealTimePointsInVbo = AppState.TimePointsUsed;
+                        }
                     }
 
                     ImGui::NewFrame();
