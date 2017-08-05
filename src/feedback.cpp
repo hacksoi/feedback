@@ -1,5 +1,7 @@
 /*
     TODO:
+        -as we zoom out, the points are closer together, which causes ugly clustering.
+            figure out a way to eliminate clusters as we move zoom out.
 */
 
 #include <Windows.h>
@@ -111,7 +113,6 @@ struct app_state
     uint32 TimePointsCapacity;
     uint32 TimePointsUsed;
     uint32 TimePointsInVbo;
-    uint32 RealTimePointsInVbo;
 
     real32 PixelsPerSecond, SecondsPerPixel;
     real32 PixelsPerSecondFactor;
@@ -759,14 +760,6 @@ GetUniformLocation(uint32 ShaderProgram, char *UniformName)
 
 /* application */
 //{
-inline internal bool32
-CheckVboNeedsToBeUpdated(app_state *AppState)
-{
-    Assert(AppState->RealTimePointsInVbo <= AppState->TimePointsUsed);
-    bool32 NeedsToBeUpdated = AppState->RealTimePointsInVbo < AppState->TimePointsUsed;
-    return NeedsToBeUpdated;
-}
-
 inline internal void
 PushTimePoint(app_state *AppState, real32 Time, real32 Y)
 {
@@ -854,74 +847,6 @@ DecreaseCameraTimePos(app_state *AppState)
 {
     real32 CameraTimePosDeltaSeconds = AppState->SecondsPerPixel * AppState->CameraTimePosDeltaPixels;
     _SetCameraTimePos(AppState, AppState->CameraTimePos - CameraTimePosDeltaSeconds);
-}
-
-internal void
-RedrawScreen(app_state *AppState)
-{
-    real32 HalfWindowWidth = (real32)AppState->WindowWidth / 2.0f;
-    real32 CameraTimePosCentered = AppState->CameraTimePos - (AppState->SecondsPerPixel * HalfWindowWidth);
-    glUniform1f(GetUniformLocation(AppState->ShaderProgram, "CameraTimePos"), CameraTimePosCentered);
-    glUniform1f(GetUniformLocation(AppState->ShaderProgram, "PixelsPerSecond"), AppState->PixelsPerSecond);
-
-    glClearColor(AppState->ClearColor);
-    glClear(GL_COLOR_BUFFER_BIT);
-
-    glUseProgram(AppState->ShaderProgram);
-    glBindVertexArray(AppState->Vao);
-
-    glUniform4f(GetUniformLocation(AppState->ShaderProgram, "ShapeColor"), 1.0f, 0.5f, 0.2f, 1.0f);
-    glDrawArrays(GL_LINE_STRIP, 0, AppState->TimePointsInVbo);
-
-    if(AppState->ShouldDrawPoints)
-    {
-        glUniform4f(GetUniformLocation(AppState->ShaderProgram, "ShapeColor"), 1.0f, 1.0f, 1.0f, 1.0f);
-        glDrawArrays(GL_POINTS, 0, AppState->TimePointsInVbo);
-    }
-
-    ImGui::Render();
-
-    SwapBuffers(GlobalDeviceContextHandle);
-}
-
-internal void
-Reset(app_state *AppState)
-{
-    AppState->TimePointsUsed = 0;
-    AppState->TimePointsInVbo = 0;
-    AppState->RealTimePointsInVbo = 0;
-    AppState->StartTime = Win32GetCurrentTime();
-    AppState->TimeElapsedWhenExitedTraceMode = 0;
-}
-
-internal void
-Save(app_state *AppState)
-{
-    FILE *File = fopen("feedback_output.fbk", "wb");
-    if(File == NULL)
-    {
-        Win32PrintErrorAndExit("Save: fopen");
-    }
-
-    fwrite((void *)AppState->TimePoints, sizeof(v2), AppState->TimePointsCapacity, File);
-    fwrite((void *)&AppState->TimePointsUsed, sizeof(uint32), 1, File);
-    fclose(File);
-}
-
-internal void
-Load(app_state *AppState)
-{
-    FILE *File = fopen("feedback_output.fbk", "rb");
-    if(File == NULL)
-    {
-        Win32PrintErrorAndExit("Load: fopen");
-    }
-
-    fread((void *)AppState->TimePoints, sizeof(v2), AppState->TimePointsCapacity, File);
-    fread((void *)&AppState->TimePointsUsed, sizeof(uint32), 1, File);
-    fclose(File);
-
-    AppState->RealTimePointsInVbo = AppState->TimePointsInVbo = 0;
 }
 //}
 
@@ -1026,6 +951,8 @@ WinMain(HINSTANCE hInstance,
     SetTimer(GlobalWindowHandle, SCROLL_TIMER_ID, RenderDelayMillis, NULL);
     AppState.StartTime = Win32GetCurrentTime();
 
+#define POLL_ONCE_PER_FRAME
+
     MSG Message;
     while(GetMessage(&Message, NULL, 0, 0))
     {
@@ -1035,6 +962,7 @@ WinMain(HINSTANCE hInstance,
         {
             case WM_LBUTTONDOWN:
             {
+#if !defined(POLL_ONCE_PER_FRAME)
                 v2i DownPoint = {GET_X_LPARAM(Message.lParam), GET_Y_LPARAM(Message.lParam)};
                 if(!CheckInsideRectangle(DownPoint, AppState.ImGuiWindowRect))
                 {
@@ -1042,15 +970,18 @@ WinMain(HINSTANCE hInstance,
                     HandleTraceModeMovement(&AppState, DownPoint.Y);
                     AppState.IsTraceMode = true;
                 }
+#endif
 
                 ImGuiIO.MouseDown[0] = true;
             } break;
 
             case WM_LBUTTONUP:
             {
+                v2i UpPoint = {GET_X_LPARAM(Message.lParam), GET_Y_LPARAM(Message.lParam)};
                 if(AppState.IsTraceMode)
                 {
                     AppState.TimeElapsedWhenExitedTraceMode = Win32GetCurrentTime() - AppState.StartTime;
+                    HandleTraceModeMovement(&AppState, UpPoint.Y);
                     AppState.IsTraceMode = false;
                 }
 
@@ -1172,24 +1103,22 @@ WinMain(HINSTANCE hInstance,
                             PushLastTimePoint(&AppState, Win32GetSecondsElapsed(AppState.StartTime));
                         }
 
-                        if(CheckVboNeedsToBeUpdated(&AppState))
+                        if(AppState.TimePointsInVbo < AppState.TimePointsUsed)
                         {
-                            uint32 ByteOffsetInVbo = AppState.RealTimePointsInVbo * sizeof(v2);
-                            uint32 NumBytesToCopy = (AppState.TimePointsUsed - AppState.RealTimePointsInVbo) * sizeof(v2);
+                            uint32 ByteOffsetInVbo = AppState.TimePointsInVbo * sizeof(v2);
+                            uint32 NumBytesToCopy = (AppState.TimePointsUsed - AppState.TimePointsInVbo) * sizeof(v2);
 
                             glBindBuffer(GL_ARRAY_BUFFER, AppState.Vbo);
                             glBufferSubData(GL_ARRAY_BUFFER, ByteOffsetInVbo, NumBytesToCopy, 
-                                            &AppState.TimePoints[AppState.RealTimePointsInVbo]);
-
-                            AppState.RealTimePointsInVbo = AppState.TimePointsInVbo = AppState.TimePointsUsed;
+                                            &AppState.TimePoints[AppState.TimePointsInVbo]);
                         }
 
                         if(AppState.IsTraceMode)
                         {
                             PopTimePoint(&AppState);
-
-                            AppState.RealTimePointsInVbo = AppState.TimePointsUsed;
                         }
+
+                        AppState.TimePointsInVbo = AppState.TimePointsUsed;
                     }
 
                     ImGui::NewFrame();
@@ -1221,19 +1150,42 @@ WinMain(HINSTANCE hInstance,
 
                         if(ImGui::Button("New"))
                         {
-                            Reset(&AppState);
+                            AppState.TimePointsUsed = 0;
+                            AppState.TimePointsInVbo = 0;
+                            AppState.TimePointsInVbo = 0;
+                            AppState.StartTime = Win32GetCurrentTime();
+                            AppState.TimeElapsedWhenExitedTraceMode = 0;
                         }
                         ImGui::SameLine();
 
                         if(ImGui::Button("Save"))
                         {
-                            Save(&AppState);
+                            FILE *File = fopen("feedback_output.fbk", "wb");
+                            if(File == NULL)
+                            {
+                                Win32PrintErrorAndExit("Save: fopen");
+                            }
+
+                            // TOUCH_UP causes us to push a time point, so no need to worry about dummies
+                            fwrite((void *)AppState.TimePoints, sizeof(v2), AppState.TimePointsCapacity, File);
+                            fwrite((void *)&AppState.TimePointsUsed, sizeof(uint32), 1, File);
+                            fclose(File);
                         }
                         ImGui::SameLine();
 
                         if(ImGui::Button("Load"))
                         {
-                            Load(&AppState);
+                            FILE *File = fopen("feedback_output.fbk", "rb");
+                            if(File == NULL)
+                            {
+                                Win32PrintErrorAndExit("Load: fopen");
+                            }
+
+                            fread((void *)AppState.TimePoints, sizeof(v2), AppState.TimePointsCapacity, File);
+                            fread((void *)&AppState.TimePointsUsed, sizeof(uint32), 1, File);
+                            fclose(File);
+
+                            AppState.TimePointsInVbo = 0;
                         }
                         ImGui::SameLine();
                     }
@@ -1242,7 +1194,38 @@ WinMain(HINSTANCE hInstance,
                     ImGui::ShowTestWindow();
 #endif
 
-                    RedrawScreen(&AppState);
+                    real32 HalfWindowWidth = (real32)AppState.WindowWidth / 2.0f;
+                    real32 CameraTimePosCentered = AppState.CameraTimePos - (AppState.SecondsPerPixel * HalfWindowWidth);
+                    glUniform1f(GetUniformLocation(AppState.ShaderProgram, "CameraTimePos"), CameraTimePosCentered);
+                    glUniform1f(GetUniformLocation(AppState.ShaderProgram, "PixelsPerSecond"), AppState.PixelsPerSecond);
+
+                    glClearColor(AppState.ClearColor);
+                    glClear(GL_COLOR_BUFFER_BIT);
+
+                    glUseProgram(AppState.ShaderProgram);
+                    glBindVertexArray(AppState.Vao);
+
+                    uint32 TimePointsToRender = AppState.TimePointsInVbo;
+
+                    // are we in trace mode?
+                    if(AppState.IsTraceMode)
+                    {
+                        // then we have an extra dummy point to draw
+                        TimePointsToRender++;
+                    }
+
+                    glUniform4f(GetUniformLocation(AppState.ShaderProgram, "ShapeColor"), 1.0f, 0.5f, 0.2f, 1.0f);
+                    glDrawArrays(GL_LINE_STRIP, 0, TimePointsToRender);
+
+                    if(AppState.ShouldDrawPoints)
+                    {
+                        glUniform4f(GetUniformLocation(AppState.ShaderProgram, "ShapeColor"), 1.0f, 1.0f, 1.0f, 1.0f);
+                        glDrawArrays(GL_POINTS, 0, TimePointsToRender);
+                    }
+
+                    ImGui::Render();
+
+                    SwapBuffers(GlobalDeviceContextHandle);
                 }
             } break;
 
