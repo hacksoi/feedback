@@ -4,3 +4,10 @@ Debug/
 *.ilk
 *.pdb
 *.obj
+*.dll
+*.exp
+*.map
+*.sdf
+*.sln
+feedback.lib
+win32_feedback.VC.opendb
