@@ -13,11 +13,11 @@ struct app_dll
     FILETIME LastWriteTime;
 
     char *Filename, *TempFilename;
-    char *FunctionNames[10];
+    char *FunctionNames[11];
 
     union
     {
-        void *FunctionPointers[10];
+        void *FunctionPointers[11];
 
         // NOTE: win32_feedback.cpp depends on the ordering of these
         struct
@@ -29,6 +29,7 @@ struct app_dll
             app_code_zoom_in *ZoomIn;
             app_code_zoom_out *ZoomOut;
             app_code_touch_movement *TouchMovement;
+            app_code_non_touch_movement *NonTouchMovement;
             app_code_key_down *KeyDown;
             app_code_key_up *KeyUp;
             app_code_render *Render;
@@ -185,12 +186,14 @@ WinMain(HINSTANCE hInstance,
     AppDLL.FunctionNames[4] = "AppZoomIn";
     AppDLL.FunctionNames[5] = "AppZoomOut";
     AppDLL.FunctionNames[6] = "AppTouchMovement";
-    AppDLL.FunctionNames[7] = "AppKeyDown";
-    AppDLL.FunctionNames[8] = "AppKeyUp";
-    AppDLL.FunctionNames[9] = "AppRender";
+    AppDLL.FunctionNames[7] = "AppNonTouchMovement";
+    AppDLL.FunctionNames[8] = "AppKeyDown";
+    AppDLL.FunctionNames[9] = "AppKeyUp";
+    AppDLL.FunctionNames[10] = "AppRender";
     if(!LoadAppCode(&AppDLL))
     {
         // TODO: logging
+        PlatformDebugPrintf("App code failed to load\n");
         return 1;
     }
 
@@ -442,7 +445,14 @@ WinMain(HINSTANCE hInstance,
 
             case WM_MOUSEMOVE:
             {
-                AppDLL.TouchMovement(AppMemory, GET_X_LPARAM(Message.lParam), GET_Y_LPARAM(Message.lParam));
+                if(Message.wParam & MK_LBUTTON)
+                {
+                    AppDLL.TouchMovement(AppMemory, GET_X_LPARAM(Message.lParam), GET_Y_LPARAM(Message.lParam));
+                }
+                else
+                {
+                    AppDLL.NonTouchMovement(AppMemory, GET_X_LPARAM(Message.lParam), GET_Y_LPARAM(Message.lParam));
+                }
             } break;
 
             case WM_MOUSEWHEEL:

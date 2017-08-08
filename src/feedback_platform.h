@@ -97,6 +97,7 @@ typedef PLATFORM_DEBUG_PRINTF(platform_debug_printf);
 #define APP_CODE_TOUCH_DOWN(Name) void Name(void *Memory, int32 TouchX, int32 TouchY)
 #define APP_CODE_TOUCH_UP(Name) void Name(void *Memory, int32 TouchX, int32 TouchY)
 #define APP_CODE_TOUCH_MOVEMENT(Name) void Name(void *Memory, int32 TouchX, int32 TouchY)
+#define APP_CODE_NON_TOUCH_MOVEMENT(Name) void Name(void *Memory, int32 TouchX, int32 TouchY)
 #define APP_CODE_ZOOM_IN(Name) void Name(void *Memory)
 #define APP_CODE_ZOOM_OUT(Name) void Name(void *Memory)
 #define APP_CODE_KEY_DOWN(Name) void Name(void *Memory, app_key Key)
@@ -108,6 +109,7 @@ typedef APP_CODE_RELOAD(app_code_reload);
 typedef APP_CODE_TOUCH_DOWN(app_code_touch_down);
 typedef APP_CODE_TOUCH_UP(app_code_touch_up);
 typedef APP_CODE_TOUCH_MOVEMENT(app_code_touch_movement);
+typedef APP_CODE_NON_TOUCH_MOVEMENT(app_code_non_touch_movement);
 typedef APP_CODE_ZOOM_IN(app_code_zoom_in);
 typedef APP_CODE_ZOOM_OUT(app_code_zoom_out);
 typedef APP_CODE_KEY_DOWN(app_code_key_down);

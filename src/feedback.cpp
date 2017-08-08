@@ -1,6 +1,5 @@
 /*
     TODO:
-        -separate platform code and app code
         -remove ability to pause in trace mode. when the user stops touching, enter playback.
         -just make platform layer pass time to app, instead of app calling platform for time?
         -put imgui window at the bottom of the screen and decrease the opengl viewport height
@@ -20,9 +19,10 @@
 //{
 enum app_mode
 {
-    AppMode_TRACE,
-    AppMode_PAUSED,
-    AppMode_PLAYBACK
+    AppMode_PRERECORD,
+    AppMode_RECORD,
+    AppMode_RECENT_PLAYBACK,
+    AppMode_RANDOM_PLAYBACK
 };
 //}
 
@@ -96,7 +96,7 @@ struct app_state
 
     int32 LastTouchX;
     real32 SingleFrameTime;
-    uint64 CounterElapsedWhenExitedTraceMode;
+    uint64 CounterElapsedWhenExitedRecordMode;
 
     v4 ClearColor, LineColor, PointColor;
 
@@ -502,7 +502,7 @@ PopTimePoint(app_state *AppState)
 }
 
 internal void
-HandleTraceModeMovement(app_state *AppState, int FlippedY)
+HandleRecordModeMovement(app_state *AppState, int FlippedY)
 {
     if(AppState->TimePointsUsed > 0)
     {
@@ -622,7 +622,7 @@ APP_CODE_INITIALIZE(AppInitialize)
     AppState->SingleFrameTime = (real32)TimeBetweenFramesMillis / 1000.0f;
     AppState->CameraTimePosDeltaPixels = 15.0f;
     AppState->ShouldDrawPoints = false;
-    AppState->Mode = AppMode_PAUSED;
+    AppState->Mode = AppMode_PRERECORD;
     AppState->LastTouchX = 0;
 
     AppState->PlatformGetCounter = PlatformGetCounter;
@@ -634,7 +634,7 @@ APP_CODE_INITIALIZE(AppInitialize)
     SetColor(&AppState->PointColor, 1.0f, 1.0f, 1.0f, 1.0f);
 
     int32 LastMousePosX = 0;
-    uint64 TimeElapsedWhenExitedTraceMode = 0;
+    uint64 TimeElapsedWhenExitedRecordMode = 0;
 
     glEnable(GL_LINE_SMOOTH);
     glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
@@ -740,11 +740,23 @@ APP_CODE_TOUCH_DOWN(AppTouchDown)
 {
     app_state *AppState = (app_state *)Memory;
 
-    if(!CheckInsideRectangle(V2I(TouchX, TouchY), AppState->ImGuiWindowRect))
+    switch(AppState->Mode)
     {
-        AppState->StartCounter = AppState->PlatformGetCounter() - AppState->CounterElapsedWhenExitedTraceMode;
-        HandleTraceModeMovement(AppState, TouchY);
-        AppState->Mode = AppMode_TRACE;
+        case AppMode_PRERECORD:
+        {
+            if(!CheckInsideRectangle(V2I(TouchX, TouchY), AppState->ImGuiWindowRect))
+            {
+                AppState->StartCounter = AppState->PlatformGetCounter() - AppState->CounterElapsedWhenExitedRecordMode;
+                HandleRecordModeMovement(AppState, TouchY);
+                AppState->Mode = AppMode_RECORD;
+            }
+        } break;
+
+        case AppMode_RECENT_PLAYBACK:
+        {
+            // save touch here for AppTouchMovement()
+            AppState->LastTouchX = TouchX;
+        } break;
     }
 
     ImGui::GetIO().MouseDown[0] = true;
@@ -754,11 +766,14 @@ APP_CODE_TOUCH_UP(AppTouchUp)
 {
     app_state *AppState = (app_state *)Memory;
 
-    if(AppState->Mode == AppMode_TRACE)
+    switch(AppState->Mode)
     {
-        AppState->CounterElapsedWhenExitedTraceMode = AppState->PlatformGetCounter() - AppState->StartCounter;
-        HandleTraceModeMovement(AppState, TouchY);
-        AppState->Mode = AppMode_PAUSED;
+        case AppMode_RECORD:
+        {
+            AppState->CounterElapsedWhenExitedRecordMode = AppState->PlatformGetCounter() - AppState->StartCounter;
+            HandleRecordModeMovement(AppState, TouchY);
+            AppState->Mode = AppMode_RECENT_PLAYBACK;
+        } break;
     }
 
     ImGui::GetIO().MouseDown[0] = false;
@@ -768,21 +783,27 @@ APP_CODE_TOUCH_MOVEMENT(AppTouchMovement)
 {
     app_state *AppState = (app_state *)Memory;
 
-    if(AppState->Mode == AppMode_TRACE)
+    switch(AppState->Mode)
     {
-        HandleTraceModeMovement(AppState, TouchY);
-    }
-    else
-    {
-        // NOTE: if(Message.wParam & MK_RBUTTON)
+        case AppMode_RECORD:
         {
-            int MouseDeltaX = TouchX - AppState->LastTouchX;
-            ChangeCameraTimePos(AppState, (real32)(-MouseDeltaX));
-        }
+            HandleRecordModeMovement(AppState, TouchY);
+        } break;
+
+        case AppMode_RECENT_PLAYBACK:
+        {
+            int TouchDeltaX = TouchX - AppState->LastTouchX;
+            ChangeCameraTimePos(AppState, (real32)(-TouchDeltaX));
+
+            AppState->LastTouchX = TouchX;
+        } break;
     }
 
-    AppState->LastTouchX = TouchX;
+    ImGui::GetIO().MousePos = ImVec2((real32)TouchX, (real32)TouchY);
+}
 
+APP_CODE_NON_TOUCH_MOVEMENT(AppNonTouchMovement)
+{
     ImGui::GetIO().MousePos = ImVec2((real32)TouchX, (real32)TouchY);
 }
 
@@ -890,14 +911,14 @@ APP_CODE_RENDER(AppRender)
 {
     app_state *AppState = (app_state *)Memory;
 
-    if(AppState->Mode == AppMode_TRACE)
+    if(AppState->Mode == AppMode_RECORD)
     {
         AppState->CameraTimePos = AppState->PlatformGetSecondsElapsed(AppState->StartCounter);
     }
 
     // update vertex buffer
     {
-        if(AppState->Mode == AppMode_TRACE)
+        if(AppState->Mode == AppMode_RECORD)
         {
             PushLastTimePoint(AppState, AppState->PlatformGetSecondsElapsed(AppState->StartCounter));
         }
@@ -912,7 +933,7 @@ APP_CODE_RENDER(AppRender)
                             &AppState->TimePoints[AppState->TimePointsInVbo]);
         }
 
-        if(AppState->Mode == AppMode_TRACE)
+        if(AppState->Mode == AppMode_RECORD)
         {
             PopTimePoint(AppState);
         }
@@ -922,76 +943,103 @@ APP_CODE_RENDER(AppRender)
 
     ImGui::NewFrame();
 #if 1
-    v2 GuiWindowSize = {(real32)AppState->WindowWidth, (real32)AppState->WindowHeight / 27.0f};
-    v2 GuiWindowPos = {0, AppState->WindowHeight - GuiWindowSize.Y};
-
-    ImGui::SetNextWindowPos(ImVec2(GuiWindowPos.X, GuiWindowPos.Y));
-    ImGui::SetNextWindowSize(ImVec2(GuiWindowSize.X, GuiWindowSize.Y)/*, ImGuiSetCond_Once*/);
-    if(ImGui::Begin("window", NULL, 
-                    ImGuiWindowFlags_NoTitleBar |
-                    ImGuiWindowFlags_NoScrollbar |
-                    ImGuiWindowFlags_NoMove |
-                    ImGuiWindowFlags_NoResize))
+    // draw bottom options window
     {
-        ImVec2 ImGuiWindowPosNative = ImGui::GetWindowPos();
-        ImVec2 ImGuiWindowSizeNative = ImGui::GetWindowSize();
-        v2 ImGuiWindowPos = {(real32)ImGuiWindowPosNative.x, (real32)ImGuiWindowPosNative.y};
-        v2 ImGuiWindowSize = {(real32)ImGuiWindowSizeNative.x, (real32)ImGuiWindowSizeNative.y};
-        RectanglePosSize(&AppState->ImGuiWindowRect, ImGuiWindowPos, ImGuiWindowSize);
+        v2 GuiWindowSize = {(real32)AppState->WindowWidth, (real32)AppState->WindowHeight / 27.0f};
+        v2 GuiWindowPos = {0, AppState->WindowHeight - GuiWindowSize.Y};
 
-#if 0
-        ImGui::Value("PixelsPerSecond", AppState->PixelsPerSecond);
-
-        local real32 TraceModeElapsedTime = 0;
-        if(AppState->Mode == AppMode_TRACE)
+        ImGui::SetNextWindowPos(ImVec2(GuiWindowPos.X, GuiWindowPos.Y));
+        ImGui::SetNextWindowSize(ImVec2(GuiWindowSize.X, GuiWindowSize.Y)/*, ImGuiSetCond_Once*/);
+        if(ImGui::Begin("window", NULL, 
+                        ImGuiWindowFlags_NoTitleBar |
+                        ImGuiWindowFlags_NoScrollbar |
+                        ImGuiWindowFlags_NoMove |
+                        ImGuiWindowFlags_NoResize))
         {
-            TraceModeElapsedTime = AppState->PlatformGetSecondsElapsed(AppState->StartCounter);
-        }
+            ImVec2 ImGuiWindowPosNative = ImGui::GetWindowPos();
+            ImVec2 ImGuiWindowSizeNative = ImGui::GetWindowSize();
+            v2 ImGuiWindowPos = {(real32)ImGuiWindowPosNative.x, (real32)ImGuiWindowPosNative.y};
+            v2 ImGuiWindowSize = {(real32)ImGuiWindowSizeNative.x, (real32)ImGuiWindowSizeNative.y};
+            RectanglePosSize(&AppState->ImGuiWindowRect, ImGuiWindowPos, ImGuiWindowSize);
 
-        ImGui::Value("TraceModeElapsedTime", TraceModeElapsedTime);
-        ImGui::Value("CameraTimePos", AppState->CameraTimePos);
-        ImGui::Checkbox("Draw Points", (bool *)&AppState->ShouldDrawPoints);
-#endif
-
-        if(ImGui::Button("New"))
-        {
-            AppState->TimePointsUsed = 0;
-            AppState->TimePointsInVbo = 0;
-            AppState->TimePointsInVbo = 0;
-            AppState->StartCounter = AppState->PlatformGetCounter();
-            AppState->CounterElapsedWhenExitedTraceMode = 0;
-        }
-        ImGui::SameLine();
-
-        if(ImGui::Button("Save"))
-        {
-            FILE *File = fopen("feedback_output.fbk", "wb");
-            if(File == NULL)
+            if(AppState->Mode == AppMode_RECENT_PLAYBACK ||
+               AppState->Mode == AppMode_RANDOM_PLAYBACK)
             {
-                // TODO: logging
-                Assert(0);
-                return;
+                if(ImGui::Button("New"))
+                {
+                    AppState->TimePointsUsed = 0;
+                    AppState->TimePointsInVbo = 0;
+                    AppState->TimePointsInVbo = 0;
+                    AppState->StartCounter = AppState->PlatformGetCounter();
+                    AppState->CounterElapsedWhenExitedRecordMode = 0;
+                }
+                ImGui::SameLine();
             }
 
-            // TOUCH_UP causes us to push a time point, so no need to worry about dummies
-            fwrite((void *)AppState->TimePoints, sizeof(v2), AppState->TimePointsCapacity, File);
-            fwrite((void *)&AppState->TimePointsUsed, sizeof(uint32), 1, File);
-            fclose(File);
-        }
-        ImGui::SameLine();
+            if(AppState->Mode == AppMode_RECENT_PLAYBACK)
+            {
+                if(ImGui::Button("Save"))
+                {
+                    FILE *File = fopen("feedback_output.fbk", "wb");
+                    if(File == NULL)
+                    {
+                        // TODO: logging
+                        Assert(0);
+                        return;
+                    }
 
-        if(ImGui::Button("Load"))
-        {
-            Load(AppState);
+                    // TOUCH_UP causes us to push a time point, so no need to worry about dummies
+                    fwrite((void *)AppState->TimePoints, sizeof(v2), AppState->TimePointsCapacity, File);
+                    fwrite((void *)&AppState->TimePointsUsed, sizeof(uint32), 1, File);
+                    fclose(File);
+                }
+                ImGui::SameLine();
+            }
+
+            if(AppState->Mode != AppMode_RECORD)
+            {
+                if(ImGui::Button("Load"))
+                {
+                    Load(AppState);
+                }
+                ImGui::SameLine();
+            }
         }
-        ImGui::SameLine();
+        ImGui::End();
     }
-    ImGui::End();
+
+    // draw debug window
+    {
+        v2 GuiWindowSize = {(real32)AppState->WindowWidth / 2.1f, (real32)AppState->WindowHeight / 8.0f};
+        v2 GuiWindowPos = {(real32)AppState->WindowWidth - GuiWindowSize.X, 0};
+
+        ImGui::SetNextWindowPos(ImVec2(GuiWindowPos.X, GuiWindowPos.Y));
+        ImGui::SetNextWindowSize(ImVec2(GuiWindowSize.X, GuiWindowSize.Y));
+        if(ImGui::Begin("debug window", NULL,
+                        ImGuiWindowFlags_NoMove |
+                        ImGuiWindowFlags_NoResize))
+        {
+            ImGui::Value("CameraTimePos", AppState->CameraTimePos);
+#if 0
+            ImGui::Value("PixelsPerSecond", AppState->PixelsPerSecond);
+
+            local real32 RecordModeElapsedTime = 0;
+            if(AppState->Mode == AppMode_TRACE)
+            {
+                RecordModeElapsedTime = AppState->PlatformGetSecondsElapsed(AppState->StartCounter);
+            }
+
+            ImGui::Value("RecordModeElapsedTime", RecordModeElapsedTime);
+            ImGui::Checkbox("Draw Points", (bool *)&AppState->ShouldDrawPoints);
+#endif
+        }
+        ImGui::End();
+    }
 #else
     ImGui::ShowTestWindow();
 #endif
 
-    bool32 ShouldDrawDummy = AppState->Mode == AppMode_TRACE;
+    bool32 ShouldDrawDummy = AppState->Mode == AppMode_RECORD;
     uint32 TimePointsToRender = ShouldDrawDummy ? AppState->TimePointsInVbo + 1 : AppState->TimePointsInVbo;
     real32 HalfWindowWidth = (real32)AppState->WindowWidth / 2.0f;
     real32 CameraTimePosCentered = AppState->CameraTimePos - (AppState->SecondsPerPixel * HalfWindowWidth);
