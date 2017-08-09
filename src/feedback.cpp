@@ -2,7 +2,7 @@
     TODO:
         -put imgui window at the bottom of the screen and decrease the opengl viewport height
         -have menu options at bottom and the CameraTimePos at the top-middle
-        -compress hour of playback to allow at time points least an
+        -this is a test that replaces what used to say compress a fuck ton
 */
 
 #include <math.h>
