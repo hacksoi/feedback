@@ -1,6 +1,5 @@
 /*
     TODO:
-        -remove ability to pause in trace mode. when the user stops touching, enter playback.
         -just make platform layer pass time to app, instead of app calling platform for time?
         -put imgui window at the bottom of the screen and decrease the opengl viewport height
         -have menu options at bottom and the CameraTimePos at the top-middle
