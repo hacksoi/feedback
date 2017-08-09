@@ -2,7 +2,7 @@
     TODO:
         -put imgui window at the bottom of the screen and decrease the opengl viewport height
         -have menu options at bottom and the CameraTimePos at the top-middle
-        -this is a test that replaces what used to say compress a fuck ton
+        -compress time points to allow for at least an hour
 */
 
 #include <math.h>
@@ -84,7 +84,7 @@ struct app_state
     uint32 TimePointsInVbo;
 
     real32 DefaultPixelsPerSecond;
-    real32 PixelsPerSecond, SecondsPerPixel;
+    real32 _PixelsPerSecond, _SecondsPerPixel;
     real32 PixelsPerSecondFactor;
 
     uint64 StartCounter;
@@ -516,78 +516,82 @@ HandleRecordModeMovement(app_state *AppState, int FlippedY)
                   (real32)(AppState->WindowHeight - FlippedY));
 }
 
-inline internal void
-_SetPixelsPerSecond(app_state *AppState, real32 NewPixelsPerSecond)
+inline internal real32
+GetSecondsPerPixel(app_state *AppState)
 {
-    AppState->PixelsPerSecond = NewPixelsPerSecond;
-    if(AppState->PixelsPerSecond < 1)
+    real32 Result = AppState->_SecondsPerPixel;
+    return Result;
+}
+
+inline internal real32
+GetPixelsPerSecond(app_state *AppState)
+{
+    real32 Result = AppState->_PixelsPerSecond;
+    return Result;
+}
+
+inline internal void
+SetPixelsPerSecond(app_state *AppState, real32 NewPixelsPerSecond)
+{
+    AppState->_PixelsPerSecond = NewPixelsPerSecond;
+    if(AppState->_PixelsPerSecond < 1)
     {
-        AppState->PixelsPerSecond = 1;
+        AppState->_PixelsPerSecond = 1;
     }
-    AppState->SecondsPerPixel = 1.0f / AppState->PixelsPerSecond;
+    AppState->_SecondsPerPixel = 1.0f / AppState->_PixelsPerSecond;
 }
 
 inline internal void
 IncreasePixelsPerSecond(app_state *AppState)
 {
-    real32 NewPixelsPerSecond = AppState->PixelsPerSecond * AppState->PixelsPerSecondFactor;
-    _SetPixelsPerSecond(AppState, NewPixelsPerSecond);
+    real32 NewPixelsPerSecond = GetPixelsPerSecond(AppState) * AppState->PixelsPerSecondFactor;
+    SetPixelsPerSecond(AppState, NewPixelsPerSecond);
 }
 
 inline internal void
 DecreasePixelsPerSecond(app_state *AppState)
 {
-    real32 NewPixelsPerSecond = AppState->PixelsPerSecond / AppState->PixelsPerSecondFactor;
-    _SetPixelsPerSecond(AppState, NewPixelsPerSecond);
+    real32 NewPixelsPerSecond = GetPixelsPerSecond(AppState) / AppState->PixelsPerSecondFactor;
+    SetPixelsPerSecond(AppState, NewPixelsPerSecond);
 }
 
 inline internal void
 _SetCameraTimePos(app_state *AppState, real32 NewCameraTimePos)
 {
     AppState->CameraTimePos = NewCameraTimePos;
+
+    if(AppState->CameraTimePos < 0.0f)
+    {
+        AppState->CameraTimePos = 0.0f;
+    }
+    else
+    {
+        real32 MaxTime = AppState->TimePoints[AppState->TimePointsUsed - 1].Time;
+        if(AppState->CameraTimePos > MaxTime)
+        {
+            AppState->CameraTimePos = MaxTime;
+        }
+    }
 }
 
 inline internal void
 ChangeCameraTimePos(app_state *AppState, real32 CameraTimePosDeltaPixels)
 {
-    _SetCameraTimePos(AppState, AppState->CameraTimePos + (AppState->SecondsPerPixel * CameraTimePosDeltaPixels));
+    _SetCameraTimePos(AppState, AppState->CameraTimePos + (GetSecondsPerPixel(AppState) * CameraTimePosDeltaPixels));
 }
 
 inline internal void
 IncreaseCameraTimePos(app_state *AppState)
 {
-    real32 CameraTimePosDeltaSeconds = AppState->SecondsPerPixel * AppState->CameraTimePosDeltaPixels;
+    real32 CameraTimePosDeltaSeconds = GetSecondsPerPixel(AppState) * AppState->CameraTimePosDeltaPixels;
     _SetCameraTimePos(AppState, AppState->CameraTimePos + CameraTimePosDeltaSeconds);
 }
 
 inline internal void
 DecreaseCameraTimePos(app_state *AppState)
 {
-    real32 CameraTimePosDeltaSeconds = AppState->SecondsPerPixel * AppState->CameraTimePosDeltaPixels;
+    real32 CameraTimePosDeltaSeconds = GetSecondsPerPixel(AppState) * AppState->CameraTimePosDeltaPixels;
     _SetCameraTimePos(AppState, AppState->CameraTimePos - CameraTimePosDeltaSeconds);
-}
-
-inline void
-Load(app_state *AppState)
-{
-    FILE *File = fopen("feedback_output.fbk", "rb");
-
-    if(File == NULL)
-    {
-        // TODO: logging
-        Assert(0);
-        return;
-    }
-
-    fread((void *)AppState->TimePoints, sizeof(v2), AppState->TimePointsCapacity, File);
-    fread((void *)&AppState->TimePointsUsed, sizeof(uint32), 1, File);
-    fclose(File);
-
-    // ensure the newly loaded time points will be uploaded to the vertex buffer
-    AppState->TimePointsInVbo = 0;
-
-    AppState->CameraTimePos = 0.0f;
-    AppState->PixelsPerSecond = AppState->DefaultPixelsPerSecond;
 }
 
 internal char
@@ -614,8 +618,7 @@ APP_CODE_INITIALIZE(AppInitialize)
     AppState->WindowWidth = WindowWidth;
     AppState->WindowHeight = WindowHeight;
     AppState->DefaultPixelsPerSecond = (real32)WindowWidth / 5.0f;
-    AppState->PixelsPerSecond = AppState->DefaultPixelsPerSecond;
-    AppState->SecondsPerPixel = 1.0f / AppState->PixelsPerSecond;
+    SetPixelsPerSecond(AppState, AppState->DefaultPixelsPerSecond);
     AppState->PixelsPerSecondFactor = 1.1f;
     AppState->SingleFrameTime = (real32)TimeBetweenFramesMillis / 1000.0f;
     AppState->CameraTimePosDeltaPixels = 15.0f;
@@ -751,6 +754,7 @@ APP_CODE_TOUCH_DOWN(AppTouchDown)
         } break;
 
         case AppMode_RECENT_PLAYBACK:
+        case AppMode_RANDOM_PLAYBACK:
         {
             // save touch here for AppTouchMovement()
             AppState->LastTouchX = TouchX;
@@ -789,6 +793,7 @@ APP_CODE_TOUCH_MOVEMENT(AppTouchMovement)
         } break;
 
         case AppMode_RECENT_PLAYBACK:
+        case AppMode_RANDOM_PLAYBACK:
         {
             int TouchDeltaX = TouchX - AppState->LastTouchX;
             ChangeCameraTimePos(AppState, (real32)(-TouchDeltaX));
@@ -943,73 +948,96 @@ APP_CODE_RENDER(AppRender)
 #if 1
     // draw bottom options window
     {
-        v2 GuiWindowSize = {(real32)AppState->WindowWidth, (real32)AppState->WindowHeight / 27.0f};
-        v2 GuiWindowPos = {0, AppState->WindowHeight - GuiWindowSize.Y};
-
-        ImGui::SetNextWindowPos(ImVec2(GuiWindowPos.X, GuiWindowPos.Y));
-        ImGui::SetNextWindowSize(ImVec2(GuiWindowSize.X, GuiWindowSize.Y)/*, ImGuiSetCond_Once*/);
-        if(ImGui::Begin("window", NULL, 
-                        ImGuiWindowFlags_NoTitleBar |
-                        ImGuiWindowFlags_NoScrollbar |
-                        ImGuiWindowFlags_NoMove |
-                        ImGuiWindowFlags_NoResize))
+        if(AppState->Mode != AppMode_RECORD)
         {
-            ImVec2 ImGuiWindowPosNative = ImGui::GetWindowPos();
-            ImVec2 ImGuiWindowSizeNative = ImGui::GetWindowSize();
-            v2 ImGuiWindowPos = {(real32)ImGuiWindowPosNative.x, (real32)ImGuiWindowPosNative.y};
-            v2 ImGuiWindowSize = {(real32)ImGuiWindowSizeNative.x, (real32)ImGuiWindowSizeNative.y};
-            RectanglePosSize(&AppState->ImGuiWindowRect, ImGuiWindowPos, ImGuiWindowSize);
+            v2 GuiWindowSize = {(real32)AppState->WindowWidth / 3.0f, (real32)AppState->WindowHeight / 27.0f};
+            v2 GuiWindowPos = {(real32)AppState->WindowWidth - GuiWindowSize.X, 0};
 
-            if(AppState->Mode == AppMode_RECENT_PLAYBACK ||
-               AppState->Mode == AppMode_RANDOM_PLAYBACK)
+            ImGui::SetNextWindowPos(ImVec2(GuiWindowPos.X, GuiWindowPos.Y));
+            ImGui::SetNextWindowSize(ImVec2(GuiWindowSize.X, GuiWindowSize.Y)/*, ImGuiSetCond_Once*/);
+            if(ImGui::Begin("window", NULL, 
+                            ImGuiWindowFlags_NoTitleBar |
+                            ImGuiWindowFlags_NoScrollbar |
+                            ImGuiWindowFlags_NoMove |
+                            ImGuiWindowFlags_NoResize))
             {
-                if(ImGui::Button("New"))
-                {
-                    AppState->TimePointsUsed = 0;
-                    AppState->TimePointsInVbo = 0;
-                    AppState->TimePointsInVbo = 0;
-                    AppState->StartCounter = AppState->PlatformGetCounter();
-                    AppState->CounterElapsedWhenExitedRecordMode = 0;
-                }
-                ImGui::SameLine();
-            }
+                ImVec2 ImGuiWindowPosNative = ImGui::GetWindowPos();
+                ImVec2 ImGuiWindowSizeNative = ImGui::GetWindowSize();
+                v2 ImGuiWindowPos = {(real32)ImGuiWindowPosNative.x, (real32)ImGuiWindowPosNative.y};
+                v2 ImGuiWindowSize = {(real32)ImGuiWindowSizeNative.x, (real32)ImGuiWindowSizeNative.y};
+                RectanglePosSize(&AppState->ImGuiWindowRect, ImGuiWindowPos, ImGuiWindowSize);
 
-            if(AppState->Mode == AppMode_RECENT_PLAYBACK)
-            {
-                if(ImGui::Button("Save"))
+                if(AppState->Mode == AppMode_RECENT_PLAYBACK ||
+                   AppState->Mode == AppMode_RANDOM_PLAYBACK)
                 {
-                    FILE *File = fopen("feedback_output.fbk", "wb");
-                    if(File == NULL)
+                    if(ImGui::Button("New"))
                     {
-                        // TODO: logging
-                        Assert(0);
-                        return;
+                        AppState->TimePointsUsed = 0;
+                        AppState->TimePointsInVbo = 0;
+                        AppState->TimePointsInVbo = 0;
+                        AppState->StartCounter = AppState->PlatformGetCounter();
+                        AppState->CounterElapsedWhenExitedRecordMode = 0;
+                        AppState->Mode = AppMode_PRERECORD;
                     }
-
-                    // TOUCH_UP causes us to push a time point, so no need to worry about dummies
-                    fwrite((void *)AppState->TimePoints, sizeof(v2), AppState->TimePointsCapacity, File);
-                    fwrite((void *)&AppState->TimePointsUsed, sizeof(uint32), 1, File);
-                    fclose(File);
+                    ImGui::SameLine();
                 }
-                ImGui::SameLine();
-            }
 
-            if(AppState->Mode != AppMode_RECORD)
-            {
-                if(ImGui::Button("Load"))
+                if(AppState->Mode == AppMode_RECENT_PLAYBACK)
                 {
-                    Load(AppState);
+                    if(ImGui::Button("Save"))
+                    {
+                        FILE *File = fopen("feedback_output.fbk", "wb");
+                        if(File == NULL)
+                        {
+                            // TODO: logging
+                            Assert(0);
+                            return;
+                        }
+
+                        // TOUCH_UP causes us to push a time point, so no need to worry about dummies
+                        fwrite((void *)AppState->TimePoints, sizeof(v2), AppState->TimePointsCapacity, File);
+                        fwrite((void *)&AppState->TimePointsUsed, sizeof(uint32), 1, File);
+                        fclose(File);
+                    }
+                    ImGui::SameLine();
                 }
-                ImGui::SameLine();
+
+                if(AppState->Mode != AppMode_RECORD)
+                {
+                    if(ImGui::Button("Load"))
+                    {
+                        FILE *File = fopen("feedback_output.fbk", "rb");
+
+                        if(File == NULL)
+                        {
+                            // TODO: logging
+                            Assert(0);
+                            return;
+                        }
+
+                        fread((void *)AppState->TimePoints, sizeof(v2), AppState->TimePointsCapacity, File);
+                        fread((void *)&AppState->TimePointsUsed, sizeof(uint32), 1, File);
+                        fclose(File);
+
+                        // ensure the newly loaded time points will be uploaded to the vertex buffer
+                        AppState->TimePointsInVbo = 0;
+
+                        AppState->CameraTimePos = 0.0f;
+                        SetPixelsPerSecond(AppState, AppState->DefaultPixelsPerSecond);
+
+                        AppState->Mode = AppMode_RANDOM_PLAYBACK;
+                    }
+                    ImGui::SameLine();
+                }
             }
+            ImGui::End();
         }
-        ImGui::End();
     }
 
     // draw debug window
     {
-        v2 GuiWindowSize = {(real32)AppState->WindowWidth / 2.1f, (real32)AppState->WindowHeight / 8.0f};
-        v2 GuiWindowPos = {(real32)AppState->WindowWidth - GuiWindowSize.X, 0};
+        v2 GuiWindowSize = {(real32)AppState->WindowWidth / 3.0f, (real32)AppState->WindowHeight / 8.0f};
+        v2 GuiWindowPos = {0, 0};
 
         ImGui::SetNextWindowPos(ImVec2(GuiWindowPos.X, GuiWindowPos.Y));
         ImGui::SetNextWindowSize(ImVec2(GuiWindowSize.X, GuiWindowSize.Y));
@@ -1037,14 +1065,15 @@ APP_CODE_RENDER(AppRender)
     ImGui::ShowTestWindow();
 #endif
 
+    // draw app
     bool32 ShouldDrawDummy = AppState->Mode == AppMode_RECORD;
     uint32 TimePointsToRender = ShouldDrawDummy ? AppState->TimePointsInVbo + 1 : AppState->TimePointsInVbo;
     real32 HalfWindowWidth = (real32)AppState->WindowWidth / 2.0f;
-    real32 CameraTimePosCentered = AppState->CameraTimePos - (AppState->SecondsPerPixel * HalfWindowWidth);
+    real32 CameraTimePosCentered = AppState->CameraTimePos - (GetSecondsPerPixel(AppState) * HalfWindowWidth);
     {
         // update uniforms
         glUniform1f(GetUniformLocation(AppState, AppState->ShaderProgram, "CameraTimePos"), CameraTimePosCentered);
-        glUniform1f(GetUniformLocation(AppState, AppState->ShaderProgram, "PixelsPerSecond"), AppState->PixelsPerSecond);
+        glUniform1f(GetUniformLocation(AppState, AppState->ShaderProgram, "PixelsPerSecond"), GetPixelsPerSecond(AppState));
 
         glClearColor(AppState->ClearColor.R, AppState->ClearColor.G, AppState->ClearColor.B, AppState->ClearColor.A);
         glClear(GL_COLOR_BUFFER_BIT);
