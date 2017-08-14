@@ -13,28 +13,9 @@ struct app_dll
     FILETIME LastWriteTime;
 
     char *Filename, *TempFilename;
-    char *FunctionNames[11];
 
-    union
-    {
-        void *FunctionPointers[11];
-
-        // NOTE: win32_feedback.cpp depends on the ordering of these
-        struct
-        {
-            app_code_initialize *Initialize;
-            app_code_reload *Reload;
-            app_code_touch_down *TouchDown;
-            app_code_touch_up *TouchUp;
-            app_code_zoom_in *ZoomIn;
-            app_code_zoom_out *ZoomOut;
-            app_code_touch_movement *TouchMovement;
-            app_code_non_touch_movement *NonTouchMovement;
-            app_code_key_down *KeyDown;
-            app_code_key_up *KeyUp;
-            app_code_render *Render;
-        };
-    };
+    app_code_initialize *Initialize;
+    app_code_handle_event *HandleEvent;
 };
 
 global uint64 GlobalPerfCountFrequency;
@@ -42,8 +23,8 @@ global char GeneralBuffer[512];
 
 /* api to application */
 //{
-inline
-PLATFORM_GET_COUNTER(PlatformGetCounter)
+inline internal uint64
+Win32GetCounter()
 {
     LARGE_INTEGER LargeInteger;
     QueryPerformanceCounter(&LargeInteger);
@@ -52,20 +33,22 @@ PLATFORM_GET_COUNTER(PlatformGetCounter)
     return Result;
 }
 
-inline
-PLATFORM_GET_SECONDS_ELAPSED(PlatformGetSecondsElapsed)
+inline internal real32
+Win32GetSecondsElapsed(uint64 StartCounter)
 {
-    real32 Result = (real32)(PlatformGetCounter() - StartCounter) / (real32)GlobalPerfCountFrequency;
+    real32 Result = (real32)(Win32GetCounter() - StartCounter) / (real32)GlobalPerfCountFrequency;
     return Result;
 }
 
 inline
-PLATFORM_DEBUG_PRINTF(PlatformDebugPrintf)
+PLATFORM_PRINTF(PlatformPrintf)
 {
     va_list VarArgs;
     va_start(VarArgs, Format);
+
     vsprintf(GeneralBuffer, Format, VarArgs);
     OutputDebugString(GeneralBuffer);
+
     va_end(VarArgs);
 }
 //}
@@ -100,11 +83,11 @@ Win32PrintError(char *FunctionName)
                      NULL) == 0)
     {
         // TODO: logging
-        PlatformDebugPrintf("Error: Win32PrintError()\n");
+        PlatformPrintf("Error: Win32PrintError()\n");
     }
 
     // TODO: logging
-    PlatformDebugPrintf("%s() failed: %s\n", FunctionName, Buffer);
+    PlatformPrintf("%s() failed: %s\n", FunctionName, Buffer);
 }
 
 LRESULT CALLBACK
@@ -131,37 +114,35 @@ WindowProc(HWND hwnd,
     return Result;
 }
 
-internal bool32
+internal void *
+LoadFunction(HMODULE Module, char *FunctionName)
+{
+    void *FunctionAddress = (void *)GetProcAddress(Module, FunctionName);
+    if(FunctionAddress == NULL)
+    {
+        Win32PrintError("GetProcAddress");
+    }
+    return FunctionAddress;
+}
+
+internal void
 LoadAppCode(app_dll *AppDLL)
 {
-    bool32 LoadedSuccessfully = true;
-
-    CopyFile(AppDLL->Filename, AppDLL->TempFilename, false);
-    AppDLL->Handle = LoadLibrary(AppDLL->TempFilename);
-    if(AppDLL->Handle != NULL)
+    if(CopyFile(AppDLL->Filename, AppDLL->TempFilename, false))
     {
-        for(uint32 FunctionNameIdx = 0; 
-            FunctionNameIdx < ArrayCount(AppDLL->FunctionNames); 
-            FunctionNameIdx++)
-        {
-            AppDLL->FunctionPointers[FunctionNameIdx] = (void *)GetProcAddress(AppDLL->Handle, AppDLL->FunctionNames[FunctionNameIdx]);
-            if(AppDLL->FunctionPointers[FunctionNameIdx] == NULL)
-            {
-                // TODO: logging
-                Win32PrintError("GetProcAddress");
-                LoadedSuccessfully = false;
-                break;
-            }
-        }
+        AppDLL->Handle = LoadLibrary(AppDLL->TempFilename);
+        AppDLL->Initialize = (app_code_initialize *)LoadFunction(AppDLL->Handle, "AppInitialize");
+        AppDLL->HandleEvent = (app_code_handle_event *)LoadFunction(AppDLL->Handle, "AppHandleEvent");
 
-        AppDLL->LastWriteTime = Win32GetLastWriteTime(AppDLL->Filename);
+        if(AppDLL->Initialize && AppDLL->HandleEvent)
+        {
+            AppDLL->LastWriteTime = Win32GetLastWriteTime(AppDLL->Filename);
+        }
     }
     else
     {
-        LoadedSuccessfully = false;
+        Win32PrintError("CopyFile");
     }
-
-    return LoadedSuccessfully;
 }
 
 internal app_key
@@ -179,23 +160,7 @@ WinMain(HINSTANCE hInstance,
     app_dll AppDLL = {};
     AppDLL.Filename = "feedback.dll";
     AppDLL.TempFilename = "feedback_temp.dll";
-    AppDLL.FunctionNames[0] = "AppInitialize";
-    AppDLL.FunctionNames[1] = "AppReload";
-    AppDLL.FunctionNames[2] = "AppTouchDown";
-    AppDLL.FunctionNames[3] = "AppTouchUp";
-    AppDLL.FunctionNames[4] = "AppZoomIn";
-    AppDLL.FunctionNames[5] = "AppZoomOut";
-    AppDLL.FunctionNames[6] = "AppTouchMovement";
-    AppDLL.FunctionNames[7] = "AppNonTouchMovement";
-    AppDLL.FunctionNames[8] = "AppKeyDown";
-    AppDLL.FunctionNames[9] = "AppKeyUp";
-    AppDLL.FunctionNames[10] = "AppRender";
-    if(!LoadAppCode(&AppDLL))
-    {
-        // TODO: logging
-        PlatformDebugPrintf("App code failed to load\n");
-        return 1;
-    }
+    LoadAppCode(&AppDLL);
 
     uint32 WindowWidth = 540;
     uint32 WindowHeight = 960;
@@ -294,21 +259,21 @@ WinMain(HINSTANCE hInstance,
     if(GlewInitStatusCode != GLEW_OK)
     {
         // TODO: logging
-        PlatformDebugPrintf("glewInit", (char *)glewGetErrorString(GlewInitStatusCode));
+        PlatformPrintf("glewInit", (char *)glewGetErrorString(GlewInitStatusCode));
         return 1;
     }
 
     if(!WGLEW_ARB_pixel_format)
     {
         // TODO: logging
-        PlatformDebugPrintf("WGL_ARB_pixel_format not supported");
+        PlatformPrintf("WGL_ARB_pixel_format not supported");
         return 1;
     }
 
     if(!WGLEW_ARB_create_context)
     {
         // TODO: logging
-        PlatformDebugPrintf("WGL_ARB_create_context not supported");
+        PlatformPrintf("WGL_ARB_create_context not supported");
         return 1;
     }
 
@@ -404,28 +369,20 @@ WinMain(HINSTANCE hInstance,
     uint32 TimeBetweenFramesMillis = 1000 / FPS;
 
     uint64 AppMemorySize = Kilobytes(1) + Megabytes(1);
-    void *AppMemory = malloc(AppMemorySize);
+    void *AppMemory = calloc(AppMemorySize, 1);
 
     ImGuiContext *ImGuiContext = ImGui::CreateContext(malloc, free);
 
-    if(!AppDLL.Initialize(AppMemory, AppMemorySize, 
-                          WindowWidth, WindowHeight, 
-                          TimeBetweenFramesMillis, 
-                          PlatformGetCounter,
-                          PlatformGetSecondsElapsed,
-                          PlatformDebugPrintf,
-                          ImGuiContext))
-    {
-        // TODO: logging
-        PlatformDebugPrintf("App failed to initialize\n");
-        DestroyWindow(WindowHandle);
-        return 1;
-    }
+    AppDLL.Initialize(AppMemory, AppMemorySize, WindowWidth, WindowHeight, 
+                      TimeBetweenFramesMillis, ImGuiContext, PlatformPrintf);
 
     const uint32 RenderTimerId = 0, RecheckDLLTimerId = 1;
     SetTimer(WindowHandle, RenderTimerId, TimeBetweenFramesMillis, NULL);
     SetTimer(WindowHandle, RecheckDLLTimerId, 500, NULL);
 
+    uint64 StartCounter = Win32GetCounter();
+
+    app_event Event;
     MSG Message;
     while(GetMessage(&Message, NULL, 0, 0))
     {
@@ -435,23 +392,36 @@ WinMain(HINSTANCE hInstance,
         {
             case WM_LBUTTONDOWN:
             {
-                AppDLL.TouchDown(AppMemory, GET_X_LPARAM(Message.lParam), GET_Y_LPARAM(Message.lParam));
+                Event.Type = AppEventType_TouchDown;
+                Event.TouchX = GET_X_LPARAM(Message.lParam);
+                Event.TouchY = GET_Y_LPARAM(Message.lParam);
+
+                AppDLL.HandleEvent(AppMemory, Win32GetSecondsElapsed(StartCounter), &Event);
             } break;
 
             case WM_LBUTTONUP:
             {
-                AppDLL.TouchUp(AppMemory, GET_X_LPARAM(Message.lParam), GET_Y_LPARAM(Message.lParam));
+                Event.Type = AppEventType_TouchUp;
+                Event.TouchX = GET_X_LPARAM(Message.lParam);
+                Event.TouchY = GET_Y_LPARAM(Message.lParam);
+
+                AppDLL.HandleEvent(AppMemory, Win32GetSecondsElapsed(StartCounter), &Event);
             } break;
 
             case WM_MOUSEMOVE:
             {
+                Event.TouchX = GET_X_LPARAM(Message.lParam);
+                Event.TouchY = GET_Y_LPARAM(Message.lParam);
+
                 if(Message.wParam & MK_LBUTTON)
                 {
-                    AppDLL.TouchMovement(AppMemory, GET_X_LPARAM(Message.lParam), GET_Y_LPARAM(Message.lParam));
+                    Event.Type = AppEventType_TouchMovement;
+                    AppDLL.HandleEvent(AppMemory, Win32GetSecondsElapsed(StartCounter), &Event);
                 }
                 else
                 {
-                    AppDLL.NonTouchMovement(AppMemory, GET_X_LPARAM(Message.lParam), GET_Y_LPARAM(Message.lParam));
+                    Event.Type = AppEventType_NonTouchMovement;
+                    AppDLL.HandleEvent(AppMemory, Win32GetSecondsElapsed(StartCounter), &Event);
                 }
             } break;
 
@@ -460,22 +430,22 @@ WinMain(HINSTANCE hInstance,
                 int WheelDelta = GET_WHEEL_DELTA_WPARAM(Message.wParam);
                 if(WheelDelta > 0)
                 {
-                    AppDLL.ZoomIn(AppMemory);
+                    Event.Type = AppEventType_ZoomInPressed;
+                    AppDLL.HandleEvent(AppMemory, Win32GetSecondsElapsed(StartCounter), &Event);
                 }
                 else if(WheelDelta < 0)
                 {
-                    AppDLL.ZoomOut(AppMemory);
+                    Event.Type = AppEventType_ZoomOutPressed;
+                    AppDLL.HandleEvent(AppMemory, Win32GetSecondsElapsed(StartCounter), &Event);
                 }
             } break;
 
             case WM_KEYDOWN:
             {
-                AppDLL.KeyDown(AppMemory, ConvertToAppKey(Message.wParam));
             } break;
 
             case WM_KEYUP:
             {
-                AppDLL.KeyUp(AppMemory, ConvertToAppKey(Message.wParam));
             } break;
 
             case WM_TIMER:
@@ -484,27 +454,24 @@ WinMain(HINSTANCE hInstance,
                 {
                     case RecheckDLLTimerId:
                     {
-                        FILETIME AppCodeDLLOnDiskLastWriteTime = Win32GetLastWriteTime(AppDLL.Filename);
-                        if(CompareFileTime(&AppDLL.LastWriteTime, &AppCodeDLLOnDiskLastWriteTime) != 0)
+                        FILETIME LatestAppCodeDLLWriteTime = Win32GetLastWriteTime(AppDLL.Filename);
+                        if(CompareFileTime(&AppDLL.LastWriteTime, &LatestAppCodeDLLWriteTime) != 0)
                         {
                             if(GetFileAttributes("lock.tmp") == INVALID_FILE_ATTRIBUTES)
                             {
                                 FreeLibrary(AppDLL.Handle);
-                                if(!LoadAppCode(&AppDLL))
-                                {
-                                    // TODO: logging
-                                    DestroyWindow(WindowHandle);
-                                    return 1;
-                                }
+                                LoadAppCode(&AppDLL);
 
-                                AppDLL.Reload(AppMemory);
+                                Event.Type = AppEventType_CodeReload;
+                                AppDLL.HandleEvent(AppMemory, Win32GetSecondsElapsed(StartCounter), &Event);
                             }
                         }
                     } break;
 
                     case RenderTimerId:
                     {
-                        AppDLL.Render(AppMemory);
+                        Event.Type = AppEventType_UpdateAndRender;
+                        AppDLL.HandleEvent(AppMemory, Win32GetSecondsElapsed(StartCounter), &Event);
                         SwapBuffers(DeviceContextHandle);
                     } break;
                 }

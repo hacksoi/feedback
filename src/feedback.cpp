@@ -1,7 +1,9 @@
 /*
     TODO:
-        -put imgui window at the bottom of the screen and decrease the opengl viewport height
-        -have menu options at bottom and the CameraTimePos at the top-middle
+        -allow new points to be added at cursor instead of middle of screen
+        -alternate the colors of the lines
+            -possible implementation: have two VBOs each of which contain every other line
+        -in playback mode, add a circle at the middle of screen that follows the graph
         -compress time points to allow for at least an hour
 */
 
@@ -17,10 +19,10 @@
 //{
 enum app_mode
 {
-    AppMode_PRERECORD,
-    AppMode_RECORD,
-    AppMode_RECENT_PLAYBACK,
-    AppMode_RANDOM_PLAYBACK
+    AppMode_PreRecording,
+    AppMode_Recording,
+    AppMode_PlaybackPaused,
+    AppMode_PlaybackPlaying
 };
 //}
 
@@ -87,28 +89,25 @@ struct app_state
     real32 _PixelsPerSecond, _SecondsPerPixel;
     real32 PixelsPerSecondFactor;
 
-    uint64 StartCounter;
+    real32 RecordingTime;
+    real32 LastFrameTime;
 
     real32 CameraTimePos;
     real32 CameraTimePosDeltaPixels;
 
     int32 LastTouchX;
     real32 SingleFrameTime;
-    uint64 CounterElapsedWhenExitedRecordMode;
+    bool32 IsCurrentRecordingSaved;
 
     v4 ClearColor, LineColor, PointColor;
 
     // platform
-    platform_get_counter *PlatformGetCounter;
-    platform_get_seconds_elapsed *PlatformGetSecondsElapsed;
-    platform_debug_printf *Printf;
+    platform_printf *Printf;
 
-    // debug
-    bool32 ShouldDrawPoints;
-
-    // imgui
+    // imgui/debug
     ImGuiContext *ImGuiContext;
     rectangle ImGuiWindowRect;
+    bool32 ShouldDrawPoints;
 
     GLuint       g_FontTexture;
     int          g_ShaderHandle, g_VertHandle, g_FragHandle;
@@ -123,6 +122,7 @@ struct app_state
 global char *VertexShaderSource = R"STR(
 #version 330 core
 layout (location = 0) in vec2 Pos;
+layout (location = 1) in vec3 Color;
 
 uniform vec2 WindowDimensions;
 uniform float PixelsPerSecond;
@@ -143,14 +143,14 @@ main()
 
 global char *FragmentShaderSource = R"STR(
 #version 330 core
-out vec4 FragColor;
+out vec4 OutputColor;
 
 uniform vec4 ShapeColor;
 
 void
 main()
 {
-    FragColor = ShapeColor;
+    OutputColor = ShapeColor;
 }
 )STR";
 //}
@@ -466,7 +466,6 @@ GetUniformLocation(app_state *AppState, uint32 ShaderProgram, char *UniformName)
     {
         // TODO: logging
         AppState->Printf("Error: could not find uniform '%s'.\n", UniformName);
-        Assert(0);
     }
 
     return UniformLocation;
@@ -476,7 +475,7 @@ GetUniformLocation(app_state *AppState, uint32 ShaderProgram, char *UniformName)
 /* application */
 //{
 inline internal void
-PushTimePoint(app_state *AppState, real32 Time, real32 Y)
+_PushTimePoint(app_state *AppState, real32 Time, real32 Y)
 {
     if(AppState->TimePointsUsed < AppState->TimePointsCapacity)
     {
@@ -488,32 +487,31 @@ PushTimePoint(app_state *AppState, real32 Time, real32 Y)
 }
 
 inline internal void
-PushLastTimePoint(app_state *AppState, real32 Time)
+_PushLastTimePoint(app_state *AppState, real32 Time)
 {
-    PushTimePoint(AppState, Time, AppState->TimePoints[AppState->TimePointsUsed - 1].Y);
+    _PushTimePoint(AppState, Time, AppState->TimePoints[AppState->TimePointsUsed - 1].Y);
 }
 
 inline internal void
-PopTimePoint(app_state *AppState)
+_PopTimePoint(app_state *AppState)
 {
     AppState->TimePointsUsed--;
 }
 
+// NOTE: CurrentTime is the seconds since the start of this recording.
 internal void
-HandleRecordModeMovement(app_state *AppState, int FlippedY)
+AddTimePoint(app_state *AppState, real32 RecordingTime, int FlippedY)
 {
     if(AppState->TimePointsUsed > 0)
     {
-        real32 TimeSinceLastTimePointAdd = (AppState->PlatformGetSecondsElapsed(AppState->StartCounter) - 
-                                            AppState->TimePoints[AppState->TimePointsUsed - 1].Time);
+        real32 TimeSinceLastTimePointAdd = RecordingTime - AppState->TimePoints[AppState->TimePointsUsed - 1].Time;
         if(TimeSinceLastTimePointAdd >= AppState->SingleFrameTime)
         {
-            PushLastTimePoint(AppState, AppState->PlatformGetSecondsElapsed(AppState->StartCounter) - AppState->SingleFrameTime);
+            _PushLastTimePoint(AppState, RecordingTime - AppState->SingleFrameTime);
         }
     }
 
-    PushTimePoint(AppState, AppState->PlatformGetSecondsElapsed(AppState->StartCounter), 
-                  (real32)(AppState->WindowHeight - FlippedY));
+    _PushTimePoint(AppState, RecordingTime, (real32)(AppState->WindowHeight - FlippedY));
 }
 
 inline internal real32
@@ -555,49 +553,14 @@ DecreasePixelsPerSecond(app_state *AppState)
     SetPixelsPerSecond(AppState, NewPixelsPerSecond);
 }
 
-inline internal void
-_SetCameraTimePos(app_state *AppState, real32 NewCameraTimePos)
+inline internal real32
+GetRecordingEndTime(app_state *AppState)
 {
-    AppState->CameraTimePos = NewCameraTimePos;
-
-    if(AppState->CameraTimePos < 0.0f)
+    real32 Result = 0;
+    if(AppState->TimePointsUsed > 0)
     {
-        AppState->CameraTimePos = 0.0f;
+        Result = AppState->TimePoints[AppState->TimePointsUsed - 1].Time;
     }
-    else
-    {
-        real32 MaxTime = AppState->TimePoints[AppState->TimePointsUsed - 1].Time;
-        if(AppState->CameraTimePos > MaxTime)
-        {
-            AppState->CameraTimePos = MaxTime;
-        }
-    }
-}
-
-inline internal void
-ChangeCameraTimePos(app_state *AppState, real32 CameraTimePosDeltaPixels)
-{
-    _SetCameraTimePos(AppState, AppState->CameraTimePos + (GetSecondsPerPixel(AppState) * CameraTimePosDeltaPixels));
-}
-
-inline internal void
-IncreaseCameraTimePos(app_state *AppState)
-{
-    real32 CameraTimePosDeltaSeconds = GetSecondsPerPixel(AppState) * AppState->CameraTimePosDeltaPixels;
-    _SetCameraTimePos(AppState, AppState->CameraTimePos + CameraTimePosDeltaSeconds);
-}
-
-inline internal void
-DecreaseCameraTimePos(app_state *AppState)
-{
-    real32 CameraTimePosDeltaSeconds = GetSecondsPerPixel(AppState) * AppState->CameraTimePosDeltaPixels;
-    _SetCameraTimePos(AppState, AppState->CameraTimePos - CameraTimePosDeltaSeconds);
-}
-
-internal char
-KeyToChar(app_key Key)
-{
-    char Result = (char)Key + 'A';
     return Result;
 }
 //}
@@ -606,36 +569,41 @@ KeyToChar(app_key Key)
 //{
 APP_CODE_INITIALIZE(AppInitialize)
 {
-    uint8 *CurrentMemory = (uint8 *)Memory;
+    app_state *AppState = (app_state *)Memory;
+    uint64 MemoryUsed = sizeof(app_state);
+    if(MemoryUsed > MemorySize)
+    {
+        // TODO: logging
+        AppState->Printf("Not enough memory for app_state\n");
+    }
 
-    app_state *AppState = (app_state *)CurrentMemory;
-    CurrentMemory += sizeof(app_state);
-
-    AppState->TimePoints = (v2 *)CurrentMemory;
+    AppState->TimePoints = (v2 *)((uint8 *)Memory + MemoryUsed);
     AppState->TimePointsCapacity = Megabytes(1) / sizeof(v2);
-    CurrentMemory += AppState->TimePointsCapacity * sizeof(v2);
+    MemoryUsed += AppState->TimePointsCapacity * sizeof(v2);
+    if(MemoryUsed > MemorySize)
+    {
+        // TODO: logging
+        AppState->Printf("Not enough memory for time points\n");
+    }
 
     AppState->WindowWidth = WindowWidth;
     AppState->WindowHeight = WindowHeight;
-    AppState->DefaultPixelsPerSecond = (real32)WindowWidth / 5.0f;
+    AppState->DefaultPixelsPerSecond = (real32)AppState->WindowWidth / 5.0f;
     SetPixelsPerSecond(AppState, AppState->DefaultPixelsPerSecond);
     AppState->PixelsPerSecondFactor = 1.1f;
     AppState->SingleFrameTime = (real32)TimeBetweenFramesMillis / 1000.0f;
     AppState->CameraTimePosDeltaPixels = 15.0f;
-    AppState->ShouldDrawPoints = false;
-    AppState->Mode = AppMode_PRERECORD;
-    AppState->LastTouchX = 0;
+    AppState->Mode = AppMode_PreRecording;
+    AppState->Printf = PlatformPrintf;
 
-    AppState->PlatformGetCounter = PlatformGetCounter;
-    AppState->PlatformGetSecondsElapsed = PlatformGetSecondsElapsed;
-    AppState->Printf = PlatformDebugPrintf;
-
+#if 1
     SetColor(&AppState->ClearColor, 0.2f, 0.3f, 0.3f, 1.0f);
     SetColor(&AppState->LineColor, 1.0f, 0.5f, 0.2f, 1.0f);
+#else
+    SetColor(&AppState->ClearColor, 1.0f, 1.0f, 1.0f, 1.0f);
+    SetColor(&AppState->LineColor, 0.0f, 0.0f, 0.0f, 1.0f);
+#endif
     SetColor(&AppState->PointColor, 1.0f, 1.0f, 1.0f, 1.0f);
-
-    int32 LastMousePosX = 0;
-    uint64 TimeElapsedWhenExitedRecordMode = 0;
 
     glEnable(GL_LINE_SMOOTH);
     glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
@@ -643,23 +611,25 @@ APP_CODE_INITIALIZE(AppInitialize)
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    // TODO: shrink the height to accomodate options window at the bottom
-    glViewport(0, 0, WindowWidth, WindowHeight);
+    glViewport(0, 0, AppState->WindowWidth, AppState->WindowHeight);
+
+    glLineWidth(3.0f);
+    glPointSize(1.5f);
 
     create_shader_result CreateVertexShaderResult = CreateShader(GL_VERTEX_SHADER, VertexShaderSource);
     if(!CreateVertexShaderResult.DidCompileSuccessfully)
     {
+        // TODO: logging
         PrintOpenGLError(AppState, CreateVertexShaderResult.Shader, 
                          glGetShaderInfoLog, "Error compiling vertex shader: \n");
-        return false;
     }
 
     create_shader_result CreateFragmentShaderResult = CreateShader(GL_FRAGMENT_SHADER, FragmentShaderSource);
     if(!CreateFragmentShaderResult.DidCompileSuccessfully)
     {
+        // TODO: logging
         PrintOpenGLError(AppState, CreateFragmentShaderResult.Shader, 
                          glGetShaderInfoLog, "Error compiling fragment shader: \n");
-        return false;
     }
 
     AppState->ShaderProgram = glCreateProgram();
@@ -671,19 +641,22 @@ APP_CODE_INITIALIZE(AppInitialize)
     glGetProgramiv(AppState->ShaderProgram, GL_LINK_STATUS, &DidProgramLinkSuccessfully);
     if(!DidProgramLinkSuccessfully)
     {
-        PrintOpenGLError(AppState, AppState->ShaderProgram, glGetProgramInfoLog, "Error linking shader program: \n");
-        return false;
+        // TODO: logging
+        PrintOpenGLError(AppState, AppState->ShaderProgram, 
+                         glGetProgramInfoLog, "Error linking shader program: \n");
     }
 
     glDeleteShader(CreateVertexShaderResult.Shader);
     glDeleteShader(CreateFragmentShaderResult.Shader);
 
     glUseProgram(AppState->ShaderProgram);
-    glUniform2f(GetUniformLocation(AppState, AppState->ShaderProgram, "WindowDimensions"), (real32)WindowWidth, (real32)WindowHeight);
+    glUniform2f(GetUniformLocation(AppState, AppState->ShaderProgram, "WindowDimensions"), 
+                (real32)AppState->WindowWidth, (real32)AppState->WindowHeight);
 
     glGenBuffers(1, &AppState->Vbo);
     glBindBuffer(GL_ARRAY_BUFFER, AppState->Vbo);
-    glBufferData(GL_ARRAY_BUFFER, AppState->TimePointsCapacity * sizeof(v2), NULL, GL_DYNAMIC_DRAW);
+    uint32 SizeOfVboElement = (2 * sizeof(float)) + (3 * sizeof(float)); // position and color
+    glBufferData(GL_ARRAY_BUFFER, 2 * AppState->TimePointsCapacity * SizeOfVboElement, NULL, GL_DYNAMIC_DRAW);
 
     glGenVertexArrays(1, &AppState->Vao);
     glBindVertexArray(AppState->Vao);
@@ -691,407 +664,361 @@ APP_CODE_INITIALIZE(AppInitialize)
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void *)0);
     glEnableVertexAttribArray(0);
 
-    glLineWidth(3.0f);
-    glPointSize(3.0f);
-
     // initialize imgui
-    AppState->ImGuiContext = ImGuiContext;
-    ImGui::SetCurrentContext(AppState->ImGuiContext);
+    {
+        AppState->ImGuiContext = ImGuiContext;
+        ImGui::SetCurrentContext(AppState->ImGuiContext);
 
-    ImGui_CreateDeviceObjects(AppState);
+        ImGui_CreateDeviceObjects(AppState);
 
-    ImGuiIO& ImGuiIO = ImGui::GetIO();
-    ImGuiIO.DisplaySize.x = (real32)AppState->WindowWidth;
-    ImGuiIO.DisplaySize.y = (real32)AppState->WindowHeight;
-    ImGuiIO.RenderDrawListsFn = NULL;
+        ImGuiIO& ImGuiIO = ImGui::GetIO();
+        ImGuiIO.DisplaySize.x = (real32)AppState->WindowWidth;
+        ImGuiIO.DisplaySize.y = (real32)AppState->WindowHeight;
+        ImGuiIO.RenderDrawListsFn = NULL;
 
-    ImGuiIO.KeyMap[ImGuiKey_Tab] = AppKey_TAB;
-    ImGuiIO.KeyMap[ImGuiKey_LeftArrow] = AppKey_LEFT;
-    ImGuiIO.KeyMap[ImGuiKey_RightArrow] = AppKey_RIGHT;
-    ImGuiIO.KeyMap[ImGuiKey_UpArrow] = AppKey_UP;
-    ImGuiIO.KeyMap[ImGuiKey_DownArrow] = AppKey_DOWN;
-    ImGuiIO.KeyMap[ImGuiKey_PageUp] = AppKey_PAGEUP;
-    ImGuiIO.KeyMap[ImGuiKey_PageDown] = AppKey_PAGEDOWN;
-    ImGuiIO.KeyMap[ImGuiKey_Home] = AppKey_HOME;
-    ImGuiIO.KeyMap[ImGuiKey_End] = AppKey_END;
-    ImGuiIO.KeyMap[ImGuiKey_Delete] = AppKey_DELETE;
-    ImGuiIO.KeyMap[ImGuiKey_Backspace] = AppKey_BACKSPACE;
-    ImGuiIO.KeyMap[ImGuiKey_Enter] = AppKey_ENTER;
-    ImGuiIO.KeyMap[ImGuiKey_Escape] = AppKey_ESCAPE;
-    ImGuiIO.KeyMap[ImGuiKey_A] = AppKey_A;
-    ImGuiIO.KeyMap[ImGuiKey_C] = AppKey_C;
-    ImGuiIO.KeyMap[ImGuiKey_V] = AppKey_V;
-    ImGuiIO.KeyMap[ImGuiKey_X] = AppKey_X;
-    ImGuiIO.KeyMap[ImGuiKey_Y] = AppKey_Y;
-    ImGuiIO.KeyMap[ImGuiKey_Z] = AppKey_Z;
-
-    AppState->StartCounter = AppState->PlatformGetCounter();
-
-    return true;
+        ImGuiIO.KeyMap[ImGuiKey_Tab] = AppKey_TAB;
+        ImGuiIO.KeyMap[ImGuiKey_LeftArrow] = AppKey_LEFT;
+        ImGuiIO.KeyMap[ImGuiKey_RightArrow] = AppKey_RIGHT;
+        ImGuiIO.KeyMap[ImGuiKey_UpArrow] = AppKey_UP;
+        ImGuiIO.KeyMap[ImGuiKey_DownArrow] = AppKey_DOWN;
+        ImGuiIO.KeyMap[ImGuiKey_PageUp] = AppKey_PAGEUP;
+        ImGuiIO.KeyMap[ImGuiKey_PageDown] = AppKey_PAGEDOWN;
+        ImGuiIO.KeyMap[ImGuiKey_Home] = AppKey_HOME;
+        ImGuiIO.KeyMap[ImGuiKey_End] = AppKey_END;
+        ImGuiIO.KeyMap[ImGuiKey_Delete] = AppKey_DELETE;
+        ImGuiIO.KeyMap[ImGuiKey_Backspace] = AppKey_BACKSPACE;
+        ImGuiIO.KeyMap[ImGuiKey_Enter] = AppKey_ENTER;
+        ImGuiIO.KeyMap[ImGuiKey_Escape] = AppKey_ESCAPE;
+        ImGuiIO.KeyMap[ImGuiKey_A] = AppKey_A;
+        ImGuiIO.KeyMap[ImGuiKey_C] = AppKey_C;
+        ImGuiIO.KeyMap[ImGuiKey_V] = AppKey_V;
+        ImGuiIO.KeyMap[ImGuiKey_X] = AppKey_X;
+        ImGuiIO.KeyMap[ImGuiKey_Y] = AppKey_Y;
+        ImGuiIO.KeyMap[ImGuiKey_Z] = AppKey_Z;
+    }
 }
 
-APP_CODE_RELOAD(AppReload)
-{
-    app_state *AppState = (app_state *)Memory;
-
-    ImGui::SetCurrentContext(AppState->ImGuiContext);
-}
-
-APP_CODE_TOUCH_DOWN(AppTouchDown)
+APP_CODE_HANDLE_EVENT(AppHandleEvent)
 {
     app_state *AppState = (app_state *)Memory;
 
     switch(AppState->Mode)
     {
-        case AppMode_PRERECORD:
+        case AppMode_Recording:
         {
-            if(!CheckInsideRectangle(V2I(TouchX, TouchY), AppState->ImGuiWindowRect))
+            real32 TimeSinceLastFrame = CurrentTime - AppState->LastFrameTime;
+            AppState->RecordingTime += TimeSinceLastFrame;
+        } break;
+
+        case AppMode_PlaybackPlaying:
+        {
+            real32 TimeSinceLastFrame = CurrentTime - AppState->LastFrameTime;
+            AppState->CameraTimePos += TimeSinceLastFrame;
+        } break;
+    }
+
+    switch(Event->Type)
+    {
+        case AppEventType_CodeReload:
+        {
+            ImGui::SetCurrentContext(AppState->ImGuiContext);
+        } break;
+
+        case AppEventType_TouchDown:
+        {
+            switch(AppState->Mode)
             {
-                AppState->StartCounter = AppState->PlatformGetCounter() - AppState->CounterElapsedWhenExitedRecordMode;
-                HandleRecordModeMovement(AppState, TouchY);
-                AppState->Mode = AppMode_RECORD;
+                case AppMode_PreRecording:
+                {
+                    if(!CheckInsideRectangle(V2I(Event->TouchX, Event->TouchY), AppState->ImGuiWindowRect))
+                    {
+                        AddTimePoint(AppState, AppState->RecordingTime, Event->TouchY);
+                        AppState->Mode = AppMode_Recording;
+                    }
+                } break;
             }
+
+            AppState->LastTouchX = Event->TouchX;
+
+            ImGui::GetIO().MouseDown[0] = true;
         } break;
 
-        case AppMode_RECENT_PLAYBACK:
-        case AppMode_RANDOM_PLAYBACK:
+        case AppEventType_TouchUp:
         {
-            // save touch here for AppTouchMovement()
-            AppState->LastTouchX = TouchX;
+            switch(AppState->Mode)
+            {
+                case AppMode_Recording:
+                {
+                    AddTimePoint(AppState, AppState->RecordingTime, Event->TouchY);
+                    AppState->IsCurrentRecordingSaved = false;
+                    AppState->Mode = AppMode_PlaybackPaused;
+                } break;
+
+                case AppMode_PlaybackPlaying:
+                {
+                    AppState->Mode = AppMode_PlaybackPaused;
+                } break;
+            }
+
+            AppState->LastTouchX = Event->TouchX;
+
+            ImGui::GetIO().MouseDown[0] = false;
         } break;
-    }
 
-    ImGui::GetIO().MouseDown[0] = true;
-}
-
-APP_CODE_TOUCH_UP(AppTouchUp)
-{
-    app_state *AppState = (app_state *)Memory;
-
-    switch(AppState->Mode)
-    {
-        case AppMode_RECORD:
+        case AppEventType_TouchMovement:
         {
-            AppState->CounterElapsedWhenExitedRecordMode = AppState->PlatformGetCounter() - AppState->StartCounter;
-            HandleRecordModeMovement(AppState, TouchY);
-            AppState->Mode = AppMode_RECENT_PLAYBACK;
+            switch(AppState->Mode)
+            {
+                case AppMode_PreRecording:
+                {
+                } break;
+
+                case AppMode_Recording:
+                {
+                    AddTimePoint(AppState, AppState->RecordingTime, Event->TouchY);
+                } break;
+
+                case AppMode_PlaybackPaused:
+                {
+                    int TouchDeltaX = Event->TouchX - AppState->LastTouchX;
+
+                    real32 CameraTimePosDeltaPixels = (real32)(-TouchDeltaX);
+                    AppState->CameraTimePos += GetSecondsPerPixel(AppState) * CameraTimePosDeltaPixels;
+                    if(AppState->CameraTimePos < 0.0f)
+                    {
+                        AppState->CameraTimePos = 0.0f;
+                    }
+                    else if(AppState->CameraTimePos > GetRecordingEndTime(AppState))
+                    {
+                        AppState->CameraTimePos = GetRecordingEndTime(AppState);
+                    }
+                } break;
+
+                case AppMode_PlaybackPlaying:
+                {
+                } break;
+            }
+
+            AppState->LastTouchX = Event->TouchX;
+
+            ImGui::GetIO().MousePos = ImVec2((real32)Event->TouchX, (real32)Event->TouchY);
         } break;
-    }
 
-    ImGui::GetIO().MouseDown[0] = false;
-}
-
-APP_CODE_TOUCH_MOVEMENT(AppTouchMovement)
-{
-    app_state *AppState = (app_state *)Memory;
-
-    switch(AppState->Mode)
-    {
-        case AppMode_RECORD:
-        {
-            HandleRecordModeMovement(AppState, TouchY);
-        } break;
-
-        case AppMode_RECENT_PLAYBACK:
-        case AppMode_RANDOM_PLAYBACK:
-        {
-            int TouchDeltaX = TouchX - AppState->LastTouchX;
-            ChangeCameraTimePos(AppState, (real32)(-TouchDeltaX));
-
-            AppState->LastTouchX = TouchX;
-        } break;
-    }
-
-    ImGui::GetIO().MousePos = ImVec2((real32)TouchX, (real32)TouchY);
-}
-
-APP_CODE_NON_TOUCH_MOVEMENT(AppNonTouchMovement)
-{
-    ImGui::GetIO().MousePos = ImVec2((real32)TouchX, (real32)TouchY);
-}
-
-APP_CODE_ZOOM_IN(AppZoomIn)
-{
-    app_state *AppState = (app_state *)Memory;
-
-    IncreasePixelsPerSecond(AppState);
-}
-
-APP_CODE_ZOOM_OUT(AppZoomOut)
-{
-    app_state *AppState = (app_state *)Memory;
-
-    DecreasePixelsPerSecond(AppState);
-}
-
-APP_CODE_KEY_DOWN(AppKeyDown)
-{
-    app_state *AppState = (app_state *)Memory;
-
-    switch(Key)
-    {
-        case AppKey_UP:
+        case AppEventType_ZoomInPressed:
         {
             IncreasePixelsPerSecond(AppState);
         } break;
 
-        case AppKey_DOWN:
+        case AppEventType_ZoomOutPressed:
         {
             DecreasePixelsPerSecond(AppState);
         } break;
 
-        case AppKey_RIGHT:
+        case AppEventType_NonTouchMovement:
         {
-            IncreaseCameraTimePos(AppState);
+            ImGui::GetIO().MousePos = ImVec2((real32)Event->TouchX, (real32)Event->TouchY);
         } break;
 
-        case AppKey_LEFT:
+        case AppEventType_UpdateAndRender:
         {
-            DecreaseCameraTimePos(AppState);
-        } break;
-    }
-
-    ImGui::GetIO().KeysDown[Key] = true;
-
-    char InputChar = -1;
-    switch(Key)
-    {
-        case AppKey_A:
-        case AppKey_B:
-        case AppKey_C:
-        case AppKey_D:
-        case AppKey_E:
-        case AppKey_F:
-        case AppKey_G:
-        case AppKey_H:
-        case AppKey_I:
-        case AppKey_J:
-        case AppKey_K:
-        case AppKey_L:
-        case AppKey_M:
-        case AppKey_N:
-        case AppKey_O:
-        case AppKey_P:
-        case AppKey_Q:
-        case AppKey_R:
-        case AppKey_S:
-        case AppKey_T:
-        case AppKey_U:
-        case AppKey_V:
-        case AppKey_W:
-        case AppKey_X:
-        case AppKey_Y:
-        case AppKey_Z:
-        {
-            InputChar = KeyToChar(Key);
-
-            if(!ImGui::GetIO().KeysDown[AppKey_SHIFT])
+            if(AppState->Mode == AppMode_Recording)
             {
-                InputChar += 32;
+                AppState->CameraTimePos = AppState->RecordingTime;
             }
-        } break;
-
-        case ' ':
-        {
-            InputChar = ' ';
-        } break;
-    }
-
-    if(InputChar != -1)
-    {
-        ImGui::GetIO().AddInputCharacter(InputChar);
-    }
-}
-
-APP_CODE_KEY_UP(AppKeyUp)
-{
-    app_state *AppState = (app_state *)Memory;
-
-    ImGui::GetIO().KeysDown[Key] = false;
-}
-
-APP_CODE_RENDER(AppRender)
-{
-    app_state *AppState = (app_state *)Memory;
-
-    if(AppState->Mode == AppMode_RECORD)
-    {
-        AppState->CameraTimePos = AppState->PlatformGetSecondsElapsed(AppState->StartCounter);
-    }
-
-    // update vertex buffer
-    {
-        if(AppState->Mode == AppMode_RECORD)
-        {
-            PushLastTimePoint(AppState, AppState->PlatformGetSecondsElapsed(AppState->StartCounter));
-        }
-
-        if(AppState->TimePointsInVbo < AppState->TimePointsUsed)
-        {
-            uint32 ByteOffsetInVbo = AppState->TimePointsInVbo * sizeof(v2);
-            uint32 NumBytesToCopy = (AppState->TimePointsUsed - AppState->TimePointsInVbo) * sizeof(v2);
-
-            glBindBuffer(GL_ARRAY_BUFFER, AppState->Vbo);
-            glBufferSubData(GL_ARRAY_BUFFER, ByteOffsetInVbo, NumBytesToCopy, 
-                            &AppState->TimePoints[AppState->TimePointsInVbo]);
-        }
-
-        if(AppState->Mode == AppMode_RECORD)
-        {
-            PopTimePoint(AppState);
-        }
-
-        AppState->TimePointsInVbo = AppState->TimePointsUsed;
-    }
-
-    ImGui::NewFrame();
-#if 1
-    // draw bottom options window
-    {
-        if(AppState->Mode != AppMode_RECORD)
-        {
-            v2 GuiWindowSize = {(real32)AppState->WindowWidth / 3.0f, (real32)AppState->WindowHeight / 27.0f};
-            v2 GuiWindowPos = {(real32)AppState->WindowWidth - GuiWindowSize.X, 0};
-
-            ImGui::SetNextWindowPos(ImVec2(GuiWindowPos.X, GuiWindowPos.Y));
-            ImGui::SetNextWindowSize(ImVec2(GuiWindowSize.X, GuiWindowSize.Y)/*, ImGuiSetCond_Once*/);
-            if(ImGui::Begin("window", NULL, 
-                            ImGuiWindowFlags_NoTitleBar |
-                            ImGuiWindowFlags_NoScrollbar |
-                            ImGuiWindowFlags_NoMove |
-                            ImGuiWindowFlags_NoResize))
+            else if(AppState->Mode == AppMode_PlaybackPlaying)
             {
-                ImVec2 ImGuiWindowPosNative = ImGui::GetWindowPos();
-                ImVec2 ImGuiWindowSizeNative = ImGui::GetWindowSize();
-                v2 ImGuiWindowPos = {(real32)ImGuiWindowPosNative.x, (real32)ImGuiWindowPosNative.y};
-                v2 ImGuiWindowSize = {(real32)ImGuiWindowSizeNative.x, (real32)ImGuiWindowSizeNative.y};
-                RectanglePosSize(&AppState->ImGuiWindowRect, ImGuiWindowPos, ImGuiWindowSize);
-
-                if(AppState->Mode == AppMode_RECENT_PLAYBACK ||
-                   AppState->Mode == AppMode_RANDOM_PLAYBACK)
+                if(AppState->CameraTimePos > GetRecordingEndTime(AppState))
                 {
+                    AppState->CameraTimePos = GetRecordingEndTime(AppState);
+                    AppState->Mode = AppMode_PlaybackPaused;
+                }
+            }
+
+            // update vertex buffer
+            {
+                if(AppState->Mode == AppMode_Recording)
+                {
+                    _PushLastTimePoint(AppState, AppState->RecordingTime);
+                }
+
+                if(AppState->TimePointsInVbo < AppState->TimePointsUsed)
+                {
+                    uint32 ByteOffsetInVbo = AppState->TimePointsInVbo * sizeof(v2);
+                    uint32 NumBytesToCopy = (AppState->TimePointsUsed - AppState->TimePointsInVbo) * sizeof(v2);
+
+                    float NewElements[2 * 16 * AppState->NumValuesPerVboElement];
+                    for(int TimePointsIndex = AppState->TimePointsInVbo; 
+                        TimePointsIndex < AppState->TimePointsUsed; 
+                        TimePointsIndex++)
+                    {
+                        // fill this easy shit in nhk
+                    }
+
+                    glBindBuffer(GL_ARRAY_BUFFER, AppState->Vbo);
+                    glBufferSubData(GL_ARRAY_BUFFER, ByteOffsetInVbo, NumBytesToCopy, 
+                                    &AppState->TimePoints[AppState->TimePointsInVbo]);
+                }
+
+                if(AppState->Mode == AppMode_Recording)
+                {
+                    _PopTimePoint(AppState);
+                }
+
+                AppState->TimePointsInVbo = AppState->TimePointsUsed;
+            }
+
+            ImGui::NewFrame();
+
+            // draw options window
+            {
+                v2 GuiWindowSize = {(real32)AppState->WindowWidth / 3.0f, (real32)AppState->WindowHeight / 27.0f};
+                v2 GuiWindowPos = {(real32)AppState->WindowWidth - GuiWindowSize.X, 0};
+
+                ImGui::SetNextWindowPos(ImVec2(GuiWindowPos.X, GuiWindowPos.Y));
+                ImGui::SetNextWindowSize(ImVec2(GuiWindowSize.X, GuiWindowSize.Y)/*, ImGuiSetCond_Once*/);
+                if(ImGui::Begin("window", NULL, 
+                                ImGuiWindowFlags_NoTitleBar |
+                                ImGuiWindowFlags_NoScrollbar |
+                                ImGuiWindowFlags_NoMove |
+                                ImGuiWindowFlags_NoResize))
+                {
+                    ImVec2 ImGuiWindowPosNative = ImGui::GetWindowPos();
+                    ImVec2 ImGuiWindowSizeNative = ImGui::GetWindowSize();
+                    v2 ImGuiWindowPos = {(real32)ImGuiWindowPosNative.x, (real32)ImGuiWindowPosNative.y};
+                    v2 ImGuiWindowSize = {(real32)ImGuiWindowSizeNative.x, (real32)ImGuiWindowSizeNative.y};
+                    RectanglePosSize(&AppState->ImGuiWindowRect, ImGuiWindowPos, ImGuiWindowSize);
+
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImColor(0.3f, 0.3f, 0.3f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImColor(0.3f, 0.3f, 0.3f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImColor(0.3f, 0.3f, 0.3f));
                     if(ImGui::Button("New"))
                     {
-                        AppState->TimePointsUsed = 0;
-                        AppState->TimePointsInVbo = 0;
-                        AppState->TimePointsInVbo = 0;
-                        AppState->StartCounter = AppState->PlatformGetCounter();
-                        AppState->CounterElapsedWhenExitedRecordMode = 0;
-                        AppState->Mode = AppMode_PRERECORD;
+                        if(AppState->Mode == AppMode_PlaybackPaused)
+                        {
+                            AppState->TimePointsUsed = 0;
+                            AppState->TimePointsInVbo = 0;
+                            AppState->TimePointsInVbo = 0;
+                            AppState->RecordingTime = 0;
+                            AppState->Mode = AppMode_PreRecording;
+                        }
                     }
-                    ImGui::SameLine();
-                }
+                    ImGui::PopStyleColor(3);
 
-                if(AppState->Mode == AppMode_RECENT_PLAYBACK)
-                {
+                    ImGui::SameLine();
                     if(ImGui::Button("Save"))
                     {
-                        FILE *File = fopen("feedback_output.fbk", "wb");
-                        if(File == NULL)
+                        if(AppState->Mode == AppMode_PlaybackPaused &&
+                           !AppState->IsCurrentRecordingSaved)
                         {
-                            // TODO: logging
-                            Assert(0);
-                            return;
+                            char *Filename = "feedback_output.fbk";
+                            FILE *File = fopen(Filename, "wb");
+                            if(File == NULL)
+                            {
+                                // TODO: logging
+                                AppState->Printf("Failed to open file: %s\n", Filename);
+                            }
+
+                            // TOUCH_UP causes us to push a time point, so no need to worry about dummies
+                            fwrite((void *)AppState->TimePoints, sizeof(v2), AppState->TimePointsCapacity, File);
+                            fwrite((void *)&AppState->TimePointsUsed, sizeof(uint32), 1, File);
+                            fclose(File);
                         }
-
-                        // TOUCH_UP causes us to push a time point, so no need to worry about dummies
-                        fwrite((void *)AppState->TimePoints, sizeof(v2), AppState->TimePointsCapacity, File);
-                        fwrite((void *)&AppState->TimePointsUsed, sizeof(uint32), 1, File);
-                        fclose(File);
                     }
-                    ImGui::SameLine();
-                }
 
-                if(AppState->Mode != AppMode_RECORD)
-                {
+                    ImGui::SameLine();
                     if(ImGui::Button("Load"))
                     {
-                        FILE *File = fopen("feedback_output.fbk", "rb");
-
-                        if(File == NULL)
+                        if(AppState->Mode == AppMode_PreRecording ||
+                           AppState->Mode == AppMode_PlaybackPaused)
                         {
-                            // TODO: logging
-                            Assert(0);
-                            return;
+                            char *Filename = "feedback_output.fbk";
+                            FILE *File = fopen(Filename, "rb");
+                            if(File == NULL)
+                            {
+                                // TODO: logging
+                                AppState->Printf("Failed to open file: %s\n", Filename);
+                            }
+
+                            fread((void *)AppState->TimePoints, sizeof(v2), AppState->TimePointsCapacity, File);
+                            fread((void *)&AppState->TimePointsUsed, sizeof(uint32), 1, File);
+                            fclose(File);
+
+                            AppState->CameraTimePos = 0.0f;
+                            SetPixelsPerSecond(AppState, AppState->DefaultPixelsPerSecond);
+
+                            // ensure the newly loaded time points will be uploaded to the vertex buffer
+                            AppState->TimePointsInVbo = 0;
+
+                            AppState->IsCurrentRecordingSaved = true;
+                            AppState->Mode = AppMode_PlaybackPaused;
                         }
-
-                        fread((void *)AppState->TimePoints, sizeof(v2), AppState->TimePointsCapacity, File);
-                        fread((void *)&AppState->TimePointsUsed, sizeof(uint32), 1, File);
-                        fclose(File);
-
-                        // ensure the newly loaded time points will be uploaded to the vertex buffer
-                        AppState->TimePointsInVbo = 0;
-
-                        AppState->CameraTimePos = 0.0f;
-                        SetPixelsPerSecond(AppState, AppState->DefaultPixelsPerSecond);
-
-                        AppState->Mode = AppMode_RANDOM_PLAYBACK;
                     }
+
                     ImGui::SameLine();
+                    if(ImGui::Button("Play"))
+                    {
+                        if(AppState->Mode == AppMode_PlaybackPaused)
+                        {
+                            AppState->Mode = AppMode_PlaybackPlaying;
+                        }
+                    }
                 }
+                ImGui::End();
             }
-            ImGui::End();
-        }
-    }
 
-    // draw debug window
-    {
-        v2 GuiWindowSize = {(real32)AppState->WindowWidth / 3.0f, (real32)AppState->WindowHeight / 8.0f};
-        v2 GuiWindowPos = {0, 0};
-
-        ImGui::SetNextWindowPos(ImVec2(GuiWindowPos.X, GuiWindowPos.Y));
-        ImGui::SetNextWindowSize(ImVec2(GuiWindowSize.X, GuiWindowSize.Y));
-        if(ImGui::Begin("debug window", NULL,
-                        ImGuiWindowFlags_NoMove |
-                        ImGuiWindowFlags_NoResize))
-        {
-            ImGui::Value("CameraTimePos", AppState->CameraTimePos);
-#if 0
-            ImGui::Value("PixelsPerSecond", AppState->PixelsPerSecond);
-
-            local real32 RecordModeElapsedTime = 0;
-            if(AppState->Mode == AppMode_TRACE)
+            // draw debug window
             {
-                RecordModeElapsedTime = AppState->PlatformGetSecondsElapsed(AppState->StartCounter);
+                v2 GuiWindowSize = {(real32)AppState->WindowWidth / 3.0f, (real32)AppState->WindowHeight / 8.0f};
+                v2 GuiWindowPos = {0, 0};
+
+                ImGui::SetNextWindowPos(ImVec2(GuiWindowPos.X, GuiWindowPos.Y));
+                ImGui::SetNextWindowSize(ImVec2(GuiWindowSize.X, GuiWindowSize.Y));
+                if(ImGui::Begin("debug window", NULL,
+                                ImGuiWindowFlags_NoMove |
+                                ImGuiWindowFlags_NoResize))
+                {
+                    ImGui::Value("CameraTimePos", AppState->CameraTimePos);
+                    ImGui::Checkbox("Draw Points", (bool *)&AppState->ShouldDrawPoints);
+                }
+                ImGui::End();
             }
 
-            ImGui::Value("RecordModeElapsedTime", RecordModeElapsedTime);
-            ImGui::Checkbox("Draw Points", (bool *)&AppState->ShouldDrawPoints);
-#endif
-        }
-        ImGui::End();
-    }
-#else
-    ImGui::ShowTestWindow();
+#if 0
+            ImGui::ShowTestWindow();
 #endif
 
-    // draw app
-    bool32 ShouldDrawDummy = AppState->Mode == AppMode_RECORD;
-    uint32 TimePointsToRender = ShouldDrawDummy ? AppState->TimePointsInVbo + 1 : AppState->TimePointsInVbo;
-    real32 HalfWindowWidth = (real32)AppState->WindowWidth / 2.0f;
-    real32 CameraTimePosCentered = AppState->CameraTimePos - (GetSecondsPerPixel(AppState) * HalfWindowWidth);
-    {
-        // update uniforms
-        glUniform1f(GetUniformLocation(AppState, AppState->ShaderProgram, "CameraTimePos"), CameraTimePosCentered);
-        glUniform1f(GetUniformLocation(AppState, AppState->ShaderProgram, "PixelsPerSecond"), GetPixelsPerSecond(AppState));
+            // draw app
+            {
+                real32 HalfWindowWidth = (real32)AppState->WindowWidth / 2.0f;
+                real32 CameraTimePosCentered = AppState->CameraTimePos - (GetSecondsPerPixel(AppState) * HalfWindowWidth);
+                glUniform1f(GetUniformLocation(AppState, AppState->ShaderProgram, "CameraTimePos"), CameraTimePosCentered);
 
-        glClearColor(AppState->ClearColor.R, AppState->ClearColor.G, AppState->ClearColor.B, AppState->ClearColor.A);
-        glClear(GL_COLOR_BUFFER_BIT);
+                glUniform1f(GetUniformLocation(AppState, AppState->ShaderProgram, "PixelsPerSecond"), GetPixelsPerSecond(AppState));
 
-        glUseProgram(AppState->ShaderProgram);
-        glBindVertexArray(AppState->Vao);
+                glClearColor(AppState->ClearColor.R, AppState->ClearColor.G, AppState->ClearColor.B, AppState->ClearColor.A);
+                glClear(GL_COLOR_BUFFER_BIT);
 
-        // draw lines and points
-        glUniform4fv(GetUniformLocation(AppState, AppState->ShaderProgram, "ShapeColor"), 1, AppState->LineColor.Values);
-        glDrawArrays(GL_LINE_STRIP, 0, TimePointsToRender);
-        if(AppState->ShouldDrawPoints)
-        {
-            glUniform4fv(GetUniformLocation(AppState, AppState->ShaderProgram, "ShapeColor"), 1, AppState->PointColor.Values);
-            glDrawArrays(GL_POINTS, 0, TimePointsToRender);
-        }
+                glUseProgram(AppState->ShaderProgram);
+                glBindVertexArray(AppState->Vao);
 
-        ImGui::Render();
-        ImGui_RenderFunction(AppState, ImGui::GetDrawData());
+                bool32 ShouldDrawDummy = AppState->Mode == AppMode_Recording;
+                uint32 TimePointsToRender = ShouldDrawDummy ? AppState->TimePointsInVbo + 1 : AppState->TimePointsInVbo;
+
+                glUniform4fv(GetUniformLocation(AppState, AppState->ShaderProgram, "ShapeColor"), 1, AppState->LineColor.Values);
+                glDrawArrays(GL_LINE_STRIP, 0, TimePointsToRender);
+
+                if(AppState->ShouldDrawPoints)
+                {
+                    glUniform4fv(GetUniformLocation(AppState, AppState->ShaderProgram, "ShapeColor"), 1, AppState->PointColor.Values);
+                    glDrawArrays(GL_POINTS, 0, TimePointsToRender);
+                }
+
+                ImGui::Render();
+                ImGui_RenderFunction(AppState, ImGui::GetDrawData());
+            }
+        } break;
     }
+
+    AppState->LastFrameTime = CurrentTime;
 }
 //}

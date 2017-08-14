@@ -32,6 +32,19 @@ typedef int32_t bool32;
 #define Megabytes(NumberOfMbs) (NumberOfMbs * 1024 * 1024)
 #define Gigabytes(NumberOfGbs) (NumberOfGbs * 1024 * 1024 * 1024)
 
+#define PLATFORM_PRINTF(Name) void Name(char *Format, ...)
+typedef PLATFORM_PRINTF(platform_printf);
+
+#define APP_CODE_INITIALIZE(Name) void Name(void *Memory, uint64 MemorySize, \
+                                            uint32 WindowWidth, uint32 WindowHeight, \
+                                            uint32 TimeBetweenFramesMillis, \
+                                            ImGuiContext *ImGuiContext, \
+                                            platform_printf *PlatformPrintf)
+typedef APP_CODE_INITIALIZE(app_code_initialize);
+
+#define APP_CODE_HANDLE_EVENT(Name) void Name(void *Memory, real32 CurrentTime, struct app_event *Event)
+typedef APP_CODE_HANDLE_EVENT(app_code_handle_event);
+
 enum app_key
 {
     // NOTE: Letters MUST be first (see KeyToChar()).
@@ -78,42 +91,31 @@ enum app_key
     AppKey_SHIFT,
 };
 
-#define PLATFORM_GET_COUNTER(Name) uint64 Name()
-#define PLATFORM_GET_SECONDS_ELAPSED(Name) real32 Name(uint64 StartCounter)
-#define PLATFORM_DEBUG_PRINTF(Name) void Name(char *Format, ...)
+enum app_event_type
+{
+    AppEventType_Initialize,
+    AppEventType_CodeReload,
+    AppEventType_UpdateAndRender,
+    AppEventType_TouchUp,
+    AppEventType_TouchDown,
+    AppEventType_TouchMovement,
+    AppEventType_NonTouchMovement,
+    AppEventType_ZoomInPressed,
+    AppEventType_ZoomOutPressed,
+};
 
-typedef PLATFORM_GET_COUNTER(platform_get_counter);
-typedef PLATFORM_GET_SECONDS_ELAPSED(platform_get_seconds_elapsed);
-typedef PLATFORM_DEBUG_PRINTF(platform_debug_printf);
+struct app_event
+{
+    app_event_type Type;
 
-#define APP_CODE_INITIALIZE(Name) bool32 Name(void *Memory, uint64 MemorySize, \
-                                              uint32 WindowWidth, uint32 WindowHeight, \
-                                              uint32 TimeBetweenFramesMillis, \
-                                              platform_get_counter *PlatformGetCounter, \
-                                              platform_get_seconds_elapsed *PlatformGetSecondsElapsed, \
-                                              platform_debug_printf *PlatformDebugPrintf, \
-                                              ImGuiContext *ImGuiContext)
-#define APP_CODE_RELOAD(Name) void Name(void *Memory)
-#define APP_CODE_TOUCH_DOWN(Name) void Name(void *Memory, int32 TouchX, int32 TouchY)
-#define APP_CODE_TOUCH_UP(Name) void Name(void *Memory, int32 TouchX, int32 TouchY)
-#define APP_CODE_TOUCH_MOVEMENT(Name) void Name(void *Memory, int32 TouchX, int32 TouchY)
-#define APP_CODE_NON_TOUCH_MOVEMENT(Name) void Name(void *Memory, int32 TouchX, int32 TouchY)
-#define APP_CODE_ZOOM_IN(Name) void Name(void *Memory)
-#define APP_CODE_ZOOM_OUT(Name) void Name(void *Memory)
-#define APP_CODE_KEY_DOWN(Name) void Name(void *Memory, app_key Key)
-#define APP_CODE_KEY_UP(Name) void Name(void *Memory, app_key Key)
-#define APP_CODE_RENDER(Name) void Name(void *Memory)
-
-typedef APP_CODE_INITIALIZE(app_code_initialize);
-typedef APP_CODE_RELOAD(app_code_reload);
-typedef APP_CODE_TOUCH_DOWN(app_code_touch_down);
-typedef APP_CODE_TOUCH_UP(app_code_touch_up);
-typedef APP_CODE_TOUCH_MOVEMENT(app_code_touch_movement);
-typedef APP_CODE_NON_TOUCH_MOVEMENT(app_code_non_touch_movement);
-typedef APP_CODE_ZOOM_IN(app_code_zoom_in);
-typedef APP_CODE_ZOOM_OUT(app_code_zoom_out);
-typedef APP_CODE_KEY_DOWN(app_code_key_down);
-typedef APP_CODE_KEY_UP(app_code_key_up);
-typedef APP_CODE_RENDER(app_code_render);
+    union
+    {
+        // touch down
+        struct
+        {
+            int TouchX, TouchY;
+        };
+    };
+};
 
 #endif

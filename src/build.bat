@@ -9,7 +9,7 @@ REM cl /c %COMMON_COMPILER_FLAGS% ..\src\imgui\*.cpp /link %COMMON_LINKER_FLAGS%
 
 del *.pdb > NUL 2> NUL
 echo WAITING FOR PDB > lock.tmp
-cl %COMMON_COMPILER_FLAGS% /LD ..\src\feedback.cpp .\imgui*.obj /link %COMMON_LINKER_FLAGS% /PDB:feedback_%random%.pdb /EXPORT:AppInitialize /EXPORT:AppReload /EXPORT:AppTouchDown /EXPORT:AppTouchUp /EXPORT:AppTouchMovement /EXPORT:AppNonTouchMovement /EXPORT:AppZoomIn /EXPORT:AppZoomOut /EXPORT:AppKeyDown /EXPORT:AppKeyUp /EXPORT:AppRender glew32.lib OpenGL32.lib
+cl %COMMON_COMPILER_FLAGS% /LD ..\src\feedback.cpp .\imgui*.obj /link %COMMON_LINKER_FLAGS% /PDB:feedback_%random%.pdb /EXPORT:AppInitialize /EXPORT:AppHandleEvent glew32.lib OpenGL32.lib
 del lock.tmp
 cl %COMMON_COMPILER_FLAGS% ..\src\win32_feedback.cpp .\imgui*.obj /link /MAP %COMMON_LINKER_FLAGS% glew32.lib User32.lib Kernel32.lib Gdi32.lib OpenGL32.lib
 
