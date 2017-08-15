@@ -846,6 +846,7 @@ APP_CODE_HANDLE_EVENT(AppHandleEvent)
                     uint32 ByteOffsetInVbo = AppState->TimePointsInVbo * sizeof(v2);
                     uint32 NumBytesToCopy = (AppState->TimePointsUsed - AppState->TimePointsInVbo) * sizeof(v2);
 
+#if 0
                     float NewElements[2 * 16 * AppState->NumValuesPerVboElement];
                     for(int TimePointsIndex = AppState->TimePointsInVbo; 
                         TimePointsIndex < AppState->TimePointsUsed; 
@@ -853,6 +854,7 @@ APP_CODE_HANDLE_EVENT(AppHandleEvent)
                     {
                         // fill this easy shit in nhk
                     }
+#endif
 
                     glBindBuffer(GL_ARRAY_BUFFER, AppState->Vbo);
                     glBufferSubData(GL_ARRAY_BUFFER, ByteOffsetInVbo, NumBytesToCopy, 
