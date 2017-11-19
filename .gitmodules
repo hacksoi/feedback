@@ -1,0 +1,3 @@
+[submodule "libraries/nps_utils"]
+	path = libraries/nps_utils
+	url = https://github.com/hacksoi/nps_utils.git

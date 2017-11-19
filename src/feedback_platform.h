@@ -1,49 +1,30 @@
 #ifndef FEEDBACK_PLATFORM_H
 #define FEEDBACK_PLATFORM_H
 
+#include "nps_common_defs.h"
+
 #include <stdio.h>
 #include <stdint.h>
 #include <stdarg.h>
 
-#include "imgui/imgui.h"
-
-typedef int8_t int8;
-typedef int16_t int16;
-typedef int32_t int32;
-typedef int64_t int64;
-
-typedef uint8_t uint8;
-typedef uint16_t uint16;
-typedef uint32_t uint32;
-typedef uint64_t uint64;
-
-typedef float real32;
-typedef double real64;
-typedef int32_t bool32;
-
-#define local static
-#define global static
-#define internal static
-
-#define ArrayCount(Array) (sizeof(Array)/sizeof(Array[0]))
-#define Assert(Expression) if(!(Expression)) { *((int *)0) = 0; }
-
-#define Kilobytes(NumberOfKbs) (NumberOfKbs * 1024)
-#define Megabytes(NumberOfMbs) (NumberOfMbs * 1024 * 1024)
-#define Gigabytes(NumberOfGbs) (NumberOfGbs * 1024 * 1024 * 1024)
+#include "imgui.h"
 
 #define PLATFORM_PRINTF(Name) void Name(char *Format, ...)
 typedef PLATFORM_PRINTF(platform_printf);
 
-#define APP_CODE_INITIALIZE(Name) void Name(void *Memory, uint64 MemorySize, \
-                                            uint32 WindowWidth, uint32 WindowHeight, \
-                                            uint32 TimeBetweenFramesMillis, \
-                                            ImGuiContext *ImGuiContext, \
-                                            platform_printf *PlatformPrintf)
-typedef APP_CODE_INITIALIZE(app_code_initialize);
+#define PLATFORM_LOG(Name) void Name(char *Format, ...)
+typedef PLATFORM_LOG(platform_log);
 
-#define APP_CODE_HANDLE_EVENT(Name) void Name(void *Memory, real32 CurrentTime, struct app_event *Event)
-typedef APP_CODE_HANDLE_EVENT(app_code_handle_event);
+#define APP_INITIALIZE(Name) bool32 Name(void *Memory, uint64_t MemorySize, \
+                                         uint32_t WindowWidth, uint32_t WindowHeight, \
+                                         float TimeBetweenFrames, \
+                                         ImGuiContext *ImGuiContext, \
+                                         platform_printf *PlatformPrintf, \
+                                         platform_log *PlatformLog)
+typedef APP_INITIALIZE(app_initialize);
+
+#define APP_UPDATE_AND_RENDER(Name) void Name(void *Memory, bool32 CodeReload, float CurrentTime, struct app_input *Input)
+typedef APP_UPDATE_AND_RENDER(app_update_and_render);
 
 enum app_key
 {
@@ -91,31 +72,20 @@ enum app_key
     AppKey_SHIFT,
 };
 
-enum app_event_type
+struct app_input
 {
-    AppEventType_Initialize,
-    AppEventType_CodeReload,
-    AppEventType_UpdateAndRender,
-    AppEventType_TouchUp,
-    AppEventType_TouchDown,
-    AppEventType_TouchMovement,
-    AppEventType_NonTouchMovement,
-    AppEventType_ZoomInPressed,
-    AppEventType_ZoomOutPressed,
-};
+    bool32 MousePressed;
+    bool32 MouseDown;
+    bool32 MouseReleased;
+    bool32 ZoomInPressed;
+    bool32 ZoomOutPressed;
 
-struct app_event
-{
-    app_event_type Type;
+    int32_t MouseX;
+    int32_t MouseY;
+    int32_t FlippedMouseY;
 
-    union
-    {
-        // touch down
-        struct
-        {
-            int TouchX, TouchY;
-        };
-    };
+    int32_t MouseDeltaX;
+    int32_t MouseDeltaY;
 };
 
 #endif

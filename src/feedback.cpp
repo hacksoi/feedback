@@ -1,17 +1,19 @@
 /*
     TODO:
-        -allow new points to be added at cursor instead of middle of screen
+        -clean up the fucking code:
+            -make Log() global
         -alternate the colors of the lines
             -possible implementation: have two VBOs each of which contain every other line
         -in playback mode, add a circle at the middle of screen that follows the graph
         -compress time points to allow for at least an hour
 */
 
-#include <math.h>
+#include "nps_math.h"
+
 #include <stdio.h>
 #include <string.h>
 
-#include "GL/glew.h"
+#include "glew.h"
 
 #include "feedback_platform.h"
 
@@ -28,85 +30,51 @@ enum app_mode
 
 /* structs */
 //{
-union v4
+struct two_points
 {
-    real32 Values[4];
-
-    struct
-    {
-        real32 X, Y, Z, W;
-    };
-
-    struct
-    {
-        real32 R, G, B, A;
-    };
+    v2 P1, P2;
 };
 
-union v2
+struct app_context
 {
-    real32 Values[2];
-
-    struct
-    {
-        union
-        {
-            real32 X;
-            real32 Time;
-        };
-
-        real32 Y;
-    };
-};
-
-struct v2i
-{
-    int X, Y;
-};
-
-struct rectangle
-{
-    v2 Min, Max;
-};
-
-// TODO: rename this to app_context
-struct app_state
-{
-    uint32 WindowWidth, WindowHeight;
+    uint32_t WindowWidth, WindowHeight;
 
     app_mode Mode;
 
-    uint32 ShaderProgram;
-    uint32 Vbo;
-    uint32 Vao;
+    uint32_t ShaderProgram;
+    uint32_t Vbo;
+    uint32_t Vao;
 
+    uint32_t TimePointsCapacity;
     v2 *TimePoints;
-    uint32 TimePointsCapacity;
-    uint32 TimePointsUsed;
-    uint32 TimePointsInVbo;
+    uint32_t TimePointsUsed;
+    uint32_t TimePointsInVbo;
 
-    real32 DefaultPixelsPerSecond;
-    real32 _PixelsPerSecond, _SecondsPerPixel;
-    real32 PixelsPerSecondFactor;
+    uint32_t ScratchSize;
+    uint8_t *Scratch;
 
-    real32 RecordingTime;
-    real32 LastFrameTime;
+    float DefaultPixelsPerSecond;
+    float _PixelsPerSecond, _SecondsPerPixel;
+    float PixelsPerSecondFactor;
 
-    real32 CameraTimePos;
-    real32 CameraTimePosDeltaPixels;
+    float RecordingTime;
+    float LastFrameTime;
 
-    int32 LastTouchX;
-    real32 SingleFrameTime;
+    float CameraTimePos;
+    float CameraTimePosDeltaPixels;
+
+    float SingleFrameTime;
     bool32 IsCurrentRecordingSaved;
 
     v4 ClearColor, LineColor, PointColor;
 
     // platform
     platform_printf *Printf;
+    platform_log *Log;
 
     // imgui/debug
     ImGuiContext *ImGuiContext;
-    rectangle ImGuiWindowRect;
+    rect2 ImGuiWindowRect;
     bool32 ShouldDrawPoints;
 
     GLuint       g_FontTexture;
@@ -119,33 +87,31 @@ struct app_state
 
 /* shaders */
 //{
+#if 0
 global char *VertexShaderSource = R"STR(
 #version 330 core
-layout (location = 0) in vec2 Pos;
-layout (location = 1) in vec3 Color;
+layout (location = 0) in vec2 TimePos;
 
 uniform vec2 WindowDimensions;
 uniform float PixelsPerSecond;
 uniform float CameraTimePos;
 
+out vec3 fsPos;
+
 void
 main()
 {
-    vec2 NewPos = vec2((Pos.x - CameraTimePos) * PixelsPerSecond, Pos.y);
-
-    // map to [-1, 1] (clip space)
-    NewPos.x = ((2.0f * NewPos.x) / WindowDimensions.x) - 1.0f;
-    NewPos.y = ((2.0f * NewPos.y) / WindowDimensions.y) - 1.0f;
-
-    gl_Position = vec4(NewPos, 0.0, 1.0);
+    vec2 ScreenPos = vec2((TimePos.x - CameraTimePos) * PixelsPerSecond, TimePos.y);
+    vec2 ClipPos = ((2.0f * ScreenPos) / WindowDimensions) - 1.0f;
+    gl_Position = vec4(ClipPos, 0.0, 1.0);
 }
 )STR";
 
 global char *FragmentShaderSource = R"STR(
 #version 330 core
-out vec4 OutputColor;
-
 uniform vec4 ShapeColor;
+
+out vec4 OutputColor;
 
 void
 main()
@@ -153,91 +119,170 @@ main()
     OutputColor = ShapeColor;
 }
 )STR";
+#else
+global char *VertexShaderSource = R"STR(
+#version 330 core
+
+layout(location = 0) in vec2 vsBottomPos;
+layout(location = 1) in vec2 vsTopPos;
+
+uniform vec2 WindowDimensions;
+
+out vec2 gsWindowDimensions;
+out vec2 gsBottomPos;
+out vec2 gsTopPos;
+
+void
+main()
+{
+    // dummy
+    gl_Position = vec4(0.0f, 0.0f, 0.0f, 1.0f);
+
+    gsWindowDimensions = WindowDimensions;
+
+    gsBottomPos = vsBottomPos;
+    gsTopPos = vsTopPos;
+}
+)STR";
+
+global char *GeometryShaderSource = R"STR(
+#version 330 core
+
+layout(lines) in;
+layout(triangle_strip, max_vertices = 4) out;
+
+in vec2 gsWindowDimensions[];
+in vec2 gsBottomPos[];
+in vec2 gsTopPos[];
+
+out vec2 fsPos;
+out vec2 fsLineP1;
+out vec2 fsLineP2;
+
+vec4
+ToClip(vec2 WorldPos)
+{
+    return vec4(((2.0f * WorldPos) / gsWindowDimensions[0]) - 1.0f, 0.0f, 1.0f);
+}
+
+void
+main()
+{
+    vec2 LineP1 = gsBottomPos[0] + 0.5f*(gsTopPos[0] - gsBottomPos[0]);
+    vec2 LineP2 = gsBottomPos[1] + 0.5f*(gsTopPos[1] - gsBottomPos[1]);
+
+    fsLineP1 = LineP1;
+    fsLineP2 = LineP2;
+
+    // bottom left
+    fsPos = gsBottomPos[0];
+    gl_Position = ToClip(gsBottomPos[0]);
+    EmitVertex();
+
+    // bottom right
+    fsPos = gsBottomPos[1];
+    gl_Position = ToClip(gsBottomPos[1]);
+    EmitVertex();
+
+    // top left
+    fsPos = gsTopPos[0];
+    gl_Position = ToClip(gsTopPos[0]);
+    EmitVertex();
+
+    // top right
+    fsPos = gsTopPos[1];
+    gl_Position = ToClip(gsTopPos[1]);
+    EmitVertex();
+
+    EndPrimitive();
+}
+)STR";
+
+global char *FragmentShaderSource = R"STR(
+#version 330 core
+
+uniform float LineWidth;
+
+in vec2 fsPos;
+in vec2 fsLineP1;
+in vec2 fsLineP2;
+
+out vec4 OutputColor;
+
+float
+DistToLine()
+{
+    vec2 LineDir = fsLineP2 - fsLineP1;
+    vec2 RelPos = fsPos - fsLineP1;
+    float RelPosDotLineDir = dot(RelPos, LineDir);
+    float LineDirLenSq = dot(LineDir, LineDir);
+    float t = clamp(RelPosDotLineDir / LineDirLenSq, 0.0f, 1.0f);
+    vec2 ClosestPointOnLine = fsLineP1 + t*LineDir;
+    vec2 Diff = fsPos - ClosestPointOnLine;
+    return length(Diff);
+}
+
+void
+main()
+{
+    float Distance = DistToLine() / (LineWidth / 2.0f);
+    float CutOff = 0.5f;
+    float Alpha;
+    if(Distance <= CutOff)
+    {
+        Alpha = 1.0f;
+    }
+    else
+    {
+        Alpha = 1.0f - ((1.0f / CutOff) * (Distance - CutOff));
+    }
+    //vec4 LineColor = vec4(0.0f, 0.0f, 0.0f, Alpha);
+    vec4 LineColor = vec4(0.0f, 0.0f, 0.0f, 1.0f);
+    OutputColor = LineColor;
+}
+)STR";
+#endif
 //}
 
 /* global variables */
 //{
 global char GeneralBuffer[512];
+global float TmpBuffer[1024 * 4];
 //}
 
-/* v2 functions */
-//{
-inline internal v2
-V2(real32 X, real32 Y)
+internal two_points
+CreatePoints(v2 P1, v2 P2, v2 P3, float LineWidth)
 {
-    v2 Result = {X, Y};
+    line2 Line1 = {P1, P2};
+    line2 Line2 = {P2, P3};
+
+    quad2 Line1QuadSimple = CreateLineQuad(Line1, LineWidth);
+    quad2 Line2QuadSimple = CreateLineQuad(Line2, LineWidth);
+
+    v2 Line1TopDirection = Line1QuadSimple.TopRight - Line1QuadSimple.TopLeft;
+    v2 Line2TopDirection = Line2QuadSimple.TopLeft - Line2QuadSimple.TopRight;
+    v2 Line1BottomDirection = Line1QuadSimple.BottomRight - Line1QuadSimple.BottomLeft;
+    v2 Line2BottomDirection = Line2QuadSimple.BottomLeft - Line2QuadSimple.BottomRight;
+
+    ray2 Line1TopRay = {Line1QuadSimple.TopLeft, Line1TopDirection};
+    ray2 Line2TopRay = {Line2QuadSimple.TopRight, Line2TopDirection};
+    ray2 Line1BottomRay = {Line1QuadSimple.BottomLeft, Line1BottomDirection};
+    ray2 Line2BottomRay = {Line2QuadSimple.BottomRight, Line2BottomDirection};
+
+    v2 TopIntersection, BottomIntersection;
+    Assert(FindIntersection(&TopIntersection, Line1TopRay, Line2TopRay) == true);
+    Assert(FindIntersection(&BottomIntersection, Line1BottomRay, Line2BottomRay) == true);
+
+    two_points Result;
+    Result.P1 = TopIntersection;
+    Result.P2 = BottomIntersection;
     return Result;
 }
-//}
-
-/* v2i functions */
-//{
-inline internal v2i
-V2I(int32 X, int32 Y)
-{
-    v2i Result = {X, Y};
-    return Result;
-}
-//}
-
-/* v4 functions */
-//{
-inline internal v4
-V4(real32 X, real32 Y, real32 Z, real32 W)
-{
-    v4 Result = {X, Y, Z, W};
-    return Result;
-}
-
-inline internal void
-SetColor(v4 *Color, real32 R, real32 G, real32 B, real32 A)
-{
-    Color->R = R;
-    Color->G = G;
-    Color->B = B;
-    Color->A = A;
-}
-//}
-
-/* rectangle functions */
-//{
-inline internal void
-RectangleResize(rectangle *Rectangle, v2 NewSize)
-{
-    Rectangle->Max.X = Rectangle->Min.X + NewSize.X - 1;
-    Rectangle->Max.Y = Rectangle->Min.Y + NewSize.Y - 1;
-}
-
-inline internal void
-RectanglePosSize(rectangle *Rectangle, v2 Pos, v2 Size)
-{
-    Rectangle->Min.X = Pos.X;
-    Rectangle->Min.Y = Pos.Y;
-
-    Rectangle->Max.X = Rectangle->Min.X + Size.X - 1;
-    Rectangle->Max.Y = Rectangle->Min.Y + Size.Y - 1;
-}
-
-inline internal bool32
-CheckInsideRectangle(v2 Point, rectangle Rectangle)
-{
-    bool32 Result = (Point.X >= Rectangle.Min.X && Point.X <= Rectangle.Max.X &&
-                   Point.Y >= Rectangle.Min.Y && Point.Y <= Rectangle.Max.Y);
-    return Result;
-}
-
-inline internal bool32
-CheckInsideRectangle(v2i Point, rectangle Rectangle)
-{
-    bool32 Result = CheckInsideRectangle(V2((real32)Point.X, (real32)Point.Y), Rectangle);
-    return Result;
-}
-//}
 
 /* IMGUI */
 //{ 
 internal void
-ImGui_CreateDeviceObjects(app_state *AppState)
+ImGui_CreateDeviceObjects(app_context *AppContext)
 {
     // Backup GL state
     GLint last_texture, last_array_buffer, last_vertex_array;
@@ -271,37 +316,37 @@ ImGui_CreateDeviceObjects(app_state *AppState)
         "	Out_Color = Frag_Color * texture( Texture, Frag_UV.st);\n"
         "}\n";
 
-    AppState->g_ShaderHandle = glCreateProgram();
-    AppState->g_VertHandle = glCreateShader(GL_VERTEX_SHADER);
-    AppState->g_FragHandle = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(AppState->g_VertHandle, 1, &vertex_shader, 0);
-    glShaderSource(AppState->g_FragHandle, 1, &fragment_shader, 0);
-    glCompileShader(AppState->g_VertHandle);
-    glCompileShader(AppState->g_FragHandle);
-    glAttachShader(AppState->g_ShaderHandle, AppState->g_VertHandle);
-    glAttachShader(AppState->g_ShaderHandle, AppState->g_FragHandle);
-    glLinkProgram(AppState->g_ShaderHandle);
+    AppContext->g_ShaderHandle = glCreateProgram();
+    AppContext->g_VertHandle = glCreateShader(GL_VERTEX_SHADER);
+    AppContext->g_FragHandle = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(AppContext->g_VertHandle, 1, &vertex_shader, 0);
+    glShaderSource(AppContext->g_FragHandle, 1, &fragment_shader, 0);
+    glCompileShader(AppContext->g_VertHandle);
+    glCompileShader(AppContext->g_FragHandle);
+    glAttachShader(AppContext->g_ShaderHandle, AppContext->g_VertHandle);
+    glAttachShader(AppContext->g_ShaderHandle, AppContext->g_FragHandle);
+    glLinkProgram(AppContext->g_ShaderHandle);
 
-    AppState->g_AttribLocationTex = glGetUniformLocation(AppState->g_ShaderHandle, "Texture");
-    AppState->g_AttribLocationProjMtx = glGetUniformLocation(AppState->g_ShaderHandle, "ProjMtx");
-    AppState->g_AttribLocationPosition = glGetAttribLocation(AppState->g_ShaderHandle, "Position");
-    AppState->g_AttribLocationUV = glGetAttribLocation(AppState->g_ShaderHandle, "UV");
-    AppState->g_AttribLocationColor = glGetAttribLocation(AppState->g_ShaderHandle, "Color");
+    AppContext->g_AttribLocationTex = glGetUniformLocation(AppContext->g_ShaderHandle, "Texture");
+    AppContext->g_AttribLocationProjMtx = glGetUniformLocation(AppContext->g_ShaderHandle, "ProjMtx");
+    AppContext->g_AttribLocationPosition = glGetAttribLocation(AppContext->g_ShaderHandle, "Position");
+    AppContext->g_AttribLocationUV = glGetAttribLocation(AppContext->g_ShaderHandle, "UV");
+    AppContext->g_AttribLocationColor = glGetAttribLocation(AppContext->g_ShaderHandle, "Color");
 
-    glGenBuffers(1, &AppState->g_VboHandle);
-    glGenBuffers(1, &AppState->g_ElementsHandle);
+    glGenBuffers(1, &AppContext->g_VboHandle);
+    glGenBuffers(1, &AppContext->g_ElementsHandle);
 
-    glGenVertexArrays(1, &AppState->g_VaoHandle);
-    glBindVertexArray(AppState->g_VaoHandle);
-    glBindBuffer(GL_ARRAY_BUFFER, AppState->g_VboHandle);
-    glEnableVertexAttribArray(AppState->g_AttribLocationPosition);
-    glEnableVertexAttribArray(AppState->g_AttribLocationUV);
-    glEnableVertexAttribArray(AppState->g_AttribLocationColor);
+    glGenVertexArrays(1, &AppContext->g_VaoHandle);
+    glBindVertexArray(AppContext->g_VaoHandle);
+    glBindBuffer(GL_ARRAY_BUFFER, AppContext->g_VboHandle);
+    glEnableVertexAttribArray(AppContext->g_AttribLocationPosition);
+    glEnableVertexAttribArray(AppContext->g_AttribLocationUV);
+    glEnableVertexAttribArray(AppContext->g_AttribLocationColor);
 
 #define OFFSETOF(TYPE, ELEMENT) ((size_t)&(((TYPE *)0)->ELEMENT))
-    glVertexAttribPointer(AppState->g_AttribLocationPosition, 2, GL_FLOAT, GL_FALSE, sizeof(ImDrawVert), (GLvoid*)OFFSETOF(ImDrawVert, pos));
-    glVertexAttribPointer(AppState->g_AttribLocationUV, 2, GL_FLOAT, GL_FALSE, sizeof(ImDrawVert), (GLvoid*)OFFSETOF(ImDrawVert, uv));
-    glVertexAttribPointer(AppState->g_AttribLocationColor, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(ImDrawVert), (GLvoid*)OFFSETOF(ImDrawVert, col));
+    glVertexAttribPointer(AppContext->g_AttribLocationPosition, 2, GL_FLOAT, GL_FALSE, sizeof(ImDrawVert), (GLvoid*)OFFSETOF(ImDrawVert, pos));
+    glVertexAttribPointer(AppContext->g_AttribLocationUV, 2, GL_FLOAT, GL_FALSE, sizeof(ImDrawVert), (GLvoid*)OFFSETOF(ImDrawVert, uv));
+    glVertexAttribPointer(AppContext->g_AttribLocationColor, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(ImDrawVert), (GLvoid*)OFFSETOF(ImDrawVert, col));
 #undef OFFSETOF
 
     // Load font
@@ -309,13 +354,13 @@ ImGui_CreateDeviceObjects(app_state *AppState)
     int Width, Height;
     ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&Pixels, &Width, &Height);
 
-    glGenTextures(1, &AppState->g_FontTexture);
-    glBindTexture(GL_TEXTURE_2D, AppState->g_FontTexture);
+    glGenTextures(1, &AppContext->g_FontTexture);
+    glBindTexture(GL_TEXTURE_2D, AppContext->g_FontTexture);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, Width, Height, 0, GL_RGBA, GL_UNSIGNED_BYTE, Pixels);
 
-    ImGui::GetIO().Fonts->TexID = (void *)(uint64_t)AppState->g_FontTexture;
+    ImGui::GetIO().Fonts->TexID = (void *)(uint64_t)AppContext->g_FontTexture;
 
     // Restore modified GL state
     glBindTexture(GL_TEXTURE_2D, last_texture);
@@ -324,7 +369,7 @@ ImGui_CreateDeviceObjects(app_state *AppState)
 }
 
 internal void
-ImGui_RenderFunction(app_state *AppState, ImDrawData* draw_data)
+ImGui_RenderFunction(app_context *AppContext, ImDrawData* draw_data)
 {
     // Avoid rendering when minimized, scale coordinates for retina displays (screen coordinates != framebuffer coordinates)
     ImGuiIO& io = ImGui::GetIO();
@@ -372,20 +417,20 @@ ImGui_RenderFunction(app_state *AppState, ImDrawData* draw_data)
         { 0.0f,                  0.0f,                  -1.0f, 0.0f },
         {-1.0f,                  1.0f,                   0.0f, 1.0f },
     };
-    glUseProgram(AppState->g_ShaderHandle);
-    glUniform1i(AppState->g_AttribLocationTex, 0);
-    glUniformMatrix4fv(AppState->g_AttribLocationProjMtx, 1, GL_FALSE, &ortho_projection[0][0]);
-    glBindVertexArray(AppState->g_VaoHandle);
+    glUseProgram(AppContext->g_ShaderHandle);
+    glUniform1i(AppContext->g_AttribLocationTex, 0);
+    glUniformMatrix4fv(AppContext->g_AttribLocationProjMtx, 1, GL_FALSE, &ortho_projection[0][0]);
+    glBindVertexArray(AppContext->g_VaoHandle);
 
     for (int n = 0; n < draw_data->CmdListsCount; n++)
     {
         const ImDrawList* cmd_list = draw_data->CmdLists[n];
         const ImDrawIdx* idx_buffer_offset = 0;
 
-        glBindBuffer(GL_ARRAY_BUFFER, AppState->g_VboHandle);
+        glBindBuffer(GL_ARRAY_BUFFER, AppContext->g_VboHandle);
         glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)cmd_list->VtxBuffer.Size * sizeof(ImDrawVert), (const GLvoid*)cmd_list->VtxBuffer.Data, GL_STREAM_DRAW);
 
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, AppState->g_ElementsHandle);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, AppContext->g_ElementsHandle);
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)cmd_list->IdxBuffer.Size * sizeof(ImDrawIdx), (const GLvoid*)cmd_list->IdxBuffer.Data, GL_STREAM_DRAW);
 
         for (int cmd_i = 0; cmd_i < cmd_list->CmdBuffer.Size; cmd_i++)
@@ -425,27 +470,9 @@ ImGui_RenderFunction(app_state *AppState, ImDrawData* draw_data)
 
 /* opengl */
 //{
-struct create_shader_result
-{
-    uint32 Shader;
-    bool32 DidCompileSuccessfully;
-};
-internal create_shader_result
-CreateShader(GLenum ShaderType, char *ShaderSource)
-{
-    create_shader_result Result = {};
-
-    Result.Shader = glCreateShader(ShaderType);
-    glShaderSource(Result.Shader, 1, &ShaderSource, NULL);
-    glCompileShader(Result.Shader);
-    glGetShaderiv(Result.Shader, GL_COMPILE_STATUS, &Result.DidCompileSuccessfully);
-
-    return Result;
-}
-
 typedef void opengl_get_error_info(GLuint shader, GLsizei maxLength, GLsizei *length, GLchar *infoLog);
 internal void
-PrintOpenGLError(app_state *AppState, uint32 OpenGLObject, opengl_get_error_info OpenGLGetErrorInfo, char *ExitMessage)
+PrintOpenGLError(app_context *AppContext, uint32_t OpenGLObject, opengl_get_error_info OpenGLGetErrorInfo, char *ExitMessage)
 {
     size_t ExitMessageLength = strlen(ExitMessage);
 
@@ -453,19 +480,54 @@ PrintOpenGLError(app_state *AppState, uint32 OpenGLObject, opengl_get_error_info
     OpenGLGetErrorInfo(OpenGLObject, (GLsizei)(sizeof(GeneralBuffer) - ExitMessageLength - 1), 
                        NULL, GeneralBuffer + ExitMessageLength);
 
-    // TODO: logging
-    AppState->Printf("%s\n", GeneralBuffer);
+    AppContext->Log("%s\n", GeneralBuffer);
 }
 
-inline internal int32
-GetUniformLocation(app_state *AppState, uint32 ShaderProgram, char *UniformName)
+internal uint32_t
+CreateShader(app_context *AppContext, GLenum ShaderType, char *ShaderSource)
 {
-    int32 UniformLocation = glGetUniformLocation(ShaderProgram, UniformName);
+    uint32_t VertexShader = glCreateShader(ShaderType);
+    glShaderSource(VertexShader, 1, &ShaderSource, NULL);
+    glCompileShader(VertexShader);
 
+    bool32 DidCompileSuccessfully;
+    glGetShaderiv(VertexShader, GL_COMPILE_STATUS, &DidCompileSuccessfully);
+    if(!DidCompileSuccessfully)
+    {
+        char *ErrorMessage;
+        switch(ShaderType)
+        {
+            case GL_VERTEX_SHADER:
+            {
+                ErrorMessage = "error compiling vertex shader: \n";
+            } break;
+
+            case GL_FRAGMENT_SHADER:
+            {
+                ErrorMessage = "error compiling fragment shader: \n";
+            } break;
+
+            default:
+            {
+                ErrorMessage = "error compiling unknown shader type: \n";
+            } break;
+        }
+
+        PrintOpenGLError(AppContext, VertexShader, glGetShaderInfoLog, ErrorMessage);
+        VertexShader = 0;
+        Assert(0);
+    }
+
+    return VertexShader;
+}
+
+inline internal int32_t
+GetUniformLocation(app_context *AppContext, uint32_t ShaderProgram, char *UniformName)
+{
+    int32_t UniformLocation = glGetUniformLocation(ShaderProgram, UniformName);
     if(UniformLocation == -1)
     {
-        // TODO: logging
-        AppState->Printf("Error: could not find uniform '%s'.\n", UniformName);
+        AppContext->Log("error: could not find uniform '%s'.\n", UniformName);
     }
 
     return UniformLocation;
@@ -475,91 +537,91 @@ GetUniformLocation(app_state *AppState, uint32 ShaderProgram, char *UniformName)
 /* application */
 //{
 inline internal void
-_PushTimePoint(app_state *AppState, real32 Time, real32 Y)
+_PushTimePoint(app_context *AppContext, float Time, float Y)
 {
-    if(AppState->TimePointsUsed < AppState->TimePointsCapacity)
+    if(AppContext->TimePointsUsed < AppContext->TimePointsCapacity)
     {
-        v2 *NewTimePoint = &AppState->TimePoints[AppState->TimePointsUsed++];
+        v2 *NewTimePoint = &AppContext->TimePoints[AppContext->TimePointsUsed++];
 
-        NewTimePoint->Time = Time;
+        NewTimePoint->X = Time;
         NewTimePoint->Y = Y;
     }
 }
 
 inline internal void
-_PushLastTimePoint(app_state *AppState, real32 Time)
+_PushLastTimePoint(app_context *AppContext, float Time)
 {
-    _PushTimePoint(AppState, Time, AppState->TimePoints[AppState->TimePointsUsed - 1].Y);
+    _PushTimePoint(AppContext, Time, AppContext->TimePoints[AppContext->TimePointsUsed - 1].Y);
 }
 
 inline internal void
-_PopTimePoint(app_state *AppState)
+_PopTimePoint(app_context *AppContext)
 {
-    AppState->TimePointsUsed--;
+    AppContext->TimePointsUsed--;
 }
 
 // NOTE: CurrentTime is the seconds since the start of this recording.
 internal void
-AddTimePoint(app_state *AppState, real32 RecordingTime, int FlippedY)
+AddTimePoint(app_context *AppContext, float RecordingTime, int32_t Y)
 {
-    if(AppState->TimePointsUsed > 0)
+    if(AppContext->TimePointsUsed > 0)
     {
-        real32 TimeSinceLastTimePointAdd = RecordingTime - AppState->TimePoints[AppState->TimePointsUsed - 1].Time;
-        if(TimeSinceLastTimePointAdd >= AppState->SingleFrameTime)
+        float TimeSinceLastTimePointAdd = RecordingTime - AppContext->TimePoints[AppContext->TimePointsUsed - 1].X;
+        if(TimeSinceLastTimePointAdd >= AppContext->SingleFrameTime)
         {
-            _PushLastTimePoint(AppState, RecordingTime - AppState->SingleFrameTime);
+            _PushLastTimePoint(AppContext, RecordingTime - AppContext->SingleFrameTime);
         }
     }
 
-    _PushTimePoint(AppState, RecordingTime, (real32)(AppState->WindowHeight - FlippedY));
+    _PushTimePoint(AppContext, RecordingTime, (float)Y);
 }
 
-inline internal real32
-GetSecondsPerPixel(app_state *AppState)
+inline internal float
+GetSecondsPerPixel(app_context *AppContext)
 {
-    real32 Result = AppState->_SecondsPerPixel;
+    float Result = AppContext->_SecondsPerPixel;
     return Result;
 }
 
-inline internal real32
-GetPixelsPerSecond(app_state *AppState)
+inline internal float
+GetPixelsPerSecond(app_context *AppContext)
 {
-    real32 Result = AppState->_PixelsPerSecond;
+    float Result = AppContext->_PixelsPerSecond;
     return Result;
 }
 
 inline internal void
-SetPixelsPerSecond(app_state *AppState, real32 NewPixelsPerSecond)
+SetPixelsPerSecond(app_context *AppContext, float NewPixelsPerSecond)
 {
-    AppState->_PixelsPerSecond = NewPixelsPerSecond;
-    if(AppState->_PixelsPerSecond < 1)
+    AppContext->_PixelsPerSecond = NewPixelsPerSecond;
+    if(AppContext->_PixelsPerSecond < 1)
     {
-        AppState->_PixelsPerSecond = 1;
+        AppContext->_PixelsPerSecond = 1;
     }
-    AppState->_SecondsPerPixel = 1.0f / AppState->_PixelsPerSecond;
+    AppContext->_SecondsPerPixel = 1.0f / AppContext->_PixelsPerSecond;
 }
 
 inline internal void
-IncreasePixelsPerSecond(app_state *AppState)
+IncreasePixelsPerSecond(app_context *AppContext)
 {
-    real32 NewPixelsPerSecond = GetPixelsPerSecond(AppState) * AppState->PixelsPerSecondFactor;
-    SetPixelsPerSecond(AppState, NewPixelsPerSecond);
+    float NewPixelsPerSecond = GetPixelsPerSecond(AppContext) * AppContext->PixelsPerSecondFactor;
+    SetPixelsPerSecond(AppContext, NewPixelsPerSecond);
 }
 
 inline internal void
-DecreasePixelsPerSecond(app_state *AppState)
+DecreasePixelsPerSecond(app_context *AppContext)
 {
-    real32 NewPixelsPerSecond = GetPixelsPerSecond(AppState) / AppState->PixelsPerSecondFactor;
-    SetPixelsPerSecond(AppState, NewPixelsPerSecond);
+    float NewPixelsPerSecond = GetPixelsPerSecond(AppContext) / AppContext->PixelsPerSecondFactor;
+    SetPixelsPerSecond(AppContext, NewPixelsPerSecond);
 }
 
-inline internal real32
-GetRecordingEndTime(app_state *AppState)
+inline internal float
+GetRecordingEndTime(app_context *AppContext)
 {
-    real32 Result = 0;
-    if(AppState->TimePointsUsed > 0)
+    float Result = 0;
+    if(AppContext->TimePointsUsed > 0)
     {
-        Result = AppState->TimePoints[AppState->TimePointsUsed - 1].Time;
+        Result = AppContext->TimePoints[AppContext->TimePointsUsed - 1].X;
     }
     return Result;
 }
@@ -567,113 +629,132 @@ GetRecordingEndTime(app_state *AppState)
 
 /* api to platform */
 //{
-APP_CODE_INITIALIZE(AppInitialize)
+APP_INITIALIZE(AppInitialize)
 {
-    app_state *AppState = (app_state *)Memory;
-    uint64 MemoryUsed = sizeof(app_state);
+    app_context *AppContext = (app_context *)Memory;
+    uint64_t MemoryUsed = sizeof(app_context);
     if(MemoryUsed > MemorySize)
     {
-        // TODO: logging
-        AppState->Printf("Not enough memory for app_state\n");
+        PlatformLog("Not enough memory for app_context\n");
+        return false;
     }
 
-    AppState->TimePoints = (v2 *)((uint8 *)Memory + MemoryUsed);
-    AppState->TimePointsCapacity = Megabytes(1) / sizeof(v2);
-    MemoryUsed += AppState->TimePointsCapacity * sizeof(v2);
+    AppContext->TimePoints = (v2 *)((uint8_t *)Memory + MemoryUsed);
+    AppContext->TimePointsCapacity = Megabytes(1) / sizeof(v2);
+    MemoryUsed += AppContext->TimePointsCapacity * sizeof(v2);
     if(MemoryUsed > MemorySize)
     {
-        // TODO: logging
-        AppState->Printf("Not enough memory for time points\n");
+        PlatformLog("Not enough memory for time points\n");
+        return false;
     }
 
-    AppState->WindowWidth = WindowWidth;
-    AppState->WindowHeight = WindowHeight;
-    AppState->DefaultPixelsPerSecond = (real32)AppState->WindowWidth / 5.0f;
-    SetPixelsPerSecond(AppState, AppState->DefaultPixelsPerSecond);
-    AppState->PixelsPerSecondFactor = 1.1f;
-    AppState->SingleFrameTime = (real32)TimeBetweenFramesMillis / 1000.0f;
-    AppState->CameraTimePosDeltaPixels = 15.0f;
-    AppState->Mode = AppMode_PreRecording;
-    AppState->Printf = PlatformPrintf;
+    AppContext->ScratchSize = Megabytes(1);
+    AppContext->Scratch = (uint8_t *)Memory + MemoryUsed;
+    MemoryUsed += AppContext->ScratchSize;
+    if(MemoryUsed > MemorySize)
+    {
+        PlatformLog("Not enough memory for scratch size\n");
+        return false;
+    }
 
-#if 1
-    SetColor(&AppState->ClearColor, 0.2f, 0.3f, 0.3f, 1.0f);
-    SetColor(&AppState->LineColor, 1.0f, 0.5f, 0.2f, 1.0f);
+    AppContext->WindowWidth = WindowWidth;
+    AppContext->WindowHeight = WindowHeight;
+    AppContext->DefaultPixelsPerSecond = (float)AppContext->WindowWidth / 5.0f;
+    SetPixelsPerSecond(AppContext, AppContext->DefaultPixelsPerSecond);
+    AppContext->PixelsPerSecondFactor = 1.1f;
+    AppContext->SingleFrameTime = (float)TimeBetweenFrames;
+    AppContext->CameraTimePosDeltaPixels = 15.0f;
+    AppContext->Mode = AppMode_PreRecording;
+    AppContext->Printf = PlatformPrintf;
+    AppContext->Log = PlatformLog;
+
+#if 0
+    SetColor(&AppContext->ClearColor, 0.2f, 0.3f, 0.3f, 1.0f);
+    SetColor(&AppContext->LineColor, 1.0f, 0.5f, 0.2f, 1.0f);
 #else
-    SetColor(&AppState->ClearColor, 1.0f, 1.0f, 1.0f, 1.0f);
-    SetColor(&AppState->LineColor, 0.0f, 0.0f, 0.0f, 1.0f);
+    AppContext->ClearColor = V4(1.0f, 1.0f, 1.0f, 1.0f);
+    AppContext->LineColor = V4(0.0f, 0.0f, 0.0f, 1.0f);
 #endif
-    SetColor(&AppState->PointColor, 1.0f, 1.0f, 1.0f, 1.0f);
+    AppContext->PointColor = V4(1.0f, 1.0f, 1.0f, 1.0f);
 
+#if 0
     glEnable(GL_LINE_SMOOTH);
     glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
+#endif
 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    glViewport(0, 0, AppState->WindowWidth, AppState->WindowHeight);
+    glViewport(0, 0, AppContext->WindowWidth, AppContext->WindowHeight);
 
-    glLineWidth(3.0f);
     glPointSize(1.5f);
 
-    create_shader_result CreateVertexShaderResult = CreateShader(GL_VERTEX_SHADER, VertexShaderSource);
-    if(!CreateVertexShaderResult.DidCompileSuccessfully)
+    uint32_t VertexShader = CreateShader(AppContext, GL_VERTEX_SHADER, VertexShaderSource);
+    if(VertexShader == 0)
     {
-        // TODO: logging
-        PrintOpenGLError(AppState, CreateVertexShaderResult.Shader, 
-                         glGetShaderInfoLog, "Error compiling vertex shader: \n");
+        return false;
     }
 
-    create_shader_result CreateFragmentShaderResult = CreateShader(GL_FRAGMENT_SHADER, FragmentShaderSource);
-    if(!CreateFragmentShaderResult.DidCompileSuccessfully)
+    uint32_t GeometryShader = CreateShader(AppContext, GL_GEOMETRY_SHADER, GeometryShaderSource);
+    if(GeometryShader == 0)
     {
-        // TODO: logging
-        PrintOpenGLError(AppState, CreateFragmentShaderResult.Shader, 
-                         glGetShaderInfoLog, "Error compiling fragment shader: \n");
+        return false;
     }
 
-    AppState->ShaderProgram = glCreateProgram();
-    glAttachShader(AppState->ShaderProgram, CreateVertexShaderResult.Shader);
-    glAttachShader(AppState->ShaderProgram, CreateFragmentShaderResult.Shader);
-    glLinkProgram(AppState->ShaderProgram);
+    uint32_t FragmentShader = CreateShader(AppContext, GL_FRAGMENT_SHADER, FragmentShaderSource);
+    if(FragmentShader == 0)
+    {
+        return false;
+    }
+
+    AppContext->ShaderProgram = glCreateProgram();
+    glAttachShader(AppContext->ShaderProgram, VertexShader);
+    glAttachShader(AppContext->ShaderProgram, GeometryShader);
+    glAttachShader(AppContext->ShaderProgram, FragmentShader);
+    glLinkProgram(AppContext->ShaderProgram);
 
     bool32 DidProgramLinkSuccessfully;
-    glGetProgramiv(AppState->ShaderProgram, GL_LINK_STATUS, &DidProgramLinkSuccessfully);
+    glGetProgramiv(AppContext->ShaderProgram, GL_LINK_STATUS, &DidProgramLinkSuccessfully);
     if(!DidProgramLinkSuccessfully)
     {
-        // TODO: logging
-        PrintOpenGLError(AppState, AppState->ShaderProgram, 
+        PrintOpenGLError(AppContext, AppContext->ShaderProgram, 
                          glGetProgramInfoLog, "Error linking shader program: \n");
+        Assert(0);
+        return false;
     }
 
-    glDeleteShader(CreateVertexShaderResult.Shader);
-    glDeleteShader(CreateFragmentShaderResult.Shader);
+    glDeleteShader(VertexShader);
+    glDeleteShader(GeometryShader);
+    glDeleteShader(FragmentShader);
 
-    glUseProgram(AppState->ShaderProgram);
-    glUniform2f(GetUniformLocation(AppState, AppState->ShaderProgram, "WindowDimensions"), 
-                (real32)AppState->WindowWidth, (real32)AppState->WindowHeight);
+    glUseProgram(AppContext->ShaderProgram);
+    glUniform2f(GetUniformLocation(AppContext, AppContext->ShaderProgram, "WindowDimensions"), 
+                (float)AppContext->WindowWidth, (float)AppContext->WindowHeight);
 
-    glGenBuffers(1, &AppState->Vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, AppState->Vbo);
-    uint32 SizeOfVboElement = (2 * sizeof(float)) + (3 * sizeof(float)); // position and color
-    glBufferData(GL_ARRAY_BUFFER, 2 * AppState->TimePointsCapacity * SizeOfVboElement, NULL, GL_DYNAMIC_DRAW);
+    glGenBuffers(1, &AppContext->Vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, AppContext->Vbo);
+    uint32_t SizeOfVboElement = 4 * sizeof(float);
+    glBufferData(GL_ARRAY_BUFFER, AppContext->TimePointsCapacity * SizeOfVboElement, NULL, GL_DYNAMIC_DRAW);
 
-    glGenVertexArrays(1, &AppState->Vao);
-    glBindVertexArray(AppState->Vao);
+    glGenVertexArrays(1, &AppContext->Vao);
+    glBindVertexArray(AppContext->Vao);
 
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void *)0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void *)0);
     glEnableVertexAttribArray(0);
+
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void *)(2 * sizeof(float)));
+    glEnableVertexAttribArray(1);
 
     // initialize imgui
     {
-        AppState->ImGuiContext = ImGuiContext;
-        ImGui::SetCurrentContext(AppState->ImGuiContext);
+        AppContext->ImGuiContext = ImGuiContext;
+        ImGui::SetCurrentContext(AppContext->ImGuiContext);
 
-        ImGui_CreateDeviceObjects(AppState);
+        ImGui_CreateDeviceObjects(AppContext);
 
         ImGuiIO& ImGuiIO = ImGui::GetIO();
-        ImGuiIO.DisplaySize.x = (real32)AppState->WindowWidth;
-        ImGuiIO.DisplaySize.y = (real32)AppState->WindowHeight;
+        ImGuiIO.DisplaySize.x = (float)AppContext->WindowWidth;
+        ImGuiIO.DisplaySize.y = (float)AppContext->WindowHeight;
         ImGuiIO.RenderDrawListsFn = NULL;
 
         ImGuiIO.KeyMap[ImGuiKey_Tab] = AppKey_TAB;
@@ -696,78 +777,55 @@ APP_CODE_INITIALIZE(AppInitialize)
         ImGuiIO.KeyMap[ImGuiKey_Y] = AppKey_Y;
         ImGuiIO.KeyMap[ImGuiKey_Z] = AppKey_Z;
     }
+
+    return true;
 }
 
-APP_CODE_HANDLE_EVENT(AppHandleEvent)
+APP_UPDATE_AND_RENDER(AppUpdateAndRender)
 {
-    app_state *AppState = (app_state *)Memory;
+    app_context *AppContext = (app_context *)Memory;
 
-    switch(AppState->Mode)
+    if(CodeReload)
+    {
+        ImGui::SetCurrentContext(AppContext->ImGuiContext);
+    }
+
+    float TimeSinceLastFrame = CurrentTime - AppContext->LastFrameTime;
+    switch(AppContext->Mode)
     {
         case AppMode_Recording:
         {
-            real32 TimeSinceLastFrame = CurrentTime - AppState->LastFrameTime;
-            AppState->RecordingTime += TimeSinceLastFrame;
+            AppContext->RecordingTime += TimeSinceLastFrame;
         } break;
 
         case AppMode_PlaybackPlaying:
         {
-            real32 TimeSinceLastFrame = CurrentTime - AppState->LastFrameTime;
-            AppState->CameraTimePos += TimeSinceLastFrame;
+            AppContext->CameraTimePos += TimeSinceLastFrame;
         } break;
     }
+    AppContext->LastFrameTime = CurrentTime;
 
-    switch(Event->Type)
+    // input
     {
-        case AppEventType_CodeReload:
+        if(Input->MousePressed)
         {
-            ImGui::SetCurrentContext(AppState->ImGuiContext);
-        } break;
-
-        case AppEventType_TouchDown:
-        {
-            switch(AppState->Mode)
+            switch(AppContext->Mode)
             {
                 case AppMode_PreRecording:
                 {
-                    if(!CheckInsideRectangle(V2I(Event->TouchX, Event->TouchY), AppState->ImGuiWindowRect))
+                    if(!CheckInsideRectangle(V2((float)Input->MouseX, (float)Input->MouseY), AppContext->ImGuiWindowRect))
                     {
-                        AddTimePoint(AppState, AppState->RecordingTime, Event->TouchY);
-                        AppState->Mode = AppMode_Recording;
+                        AppContext->Mode = AppMode_Recording;
                     }
                 } break;
             }
 
-            AppState->LastTouchX = Event->TouchX;
-
             ImGui::GetIO().MouseDown[0] = true;
-        } break;
+        }
 
-        case AppEventType_TouchUp:
+        if(Input->MouseDown)
         {
-            switch(AppState->Mode)
-            {
-                case AppMode_Recording:
-                {
-                    AddTimePoint(AppState, AppState->RecordingTime, Event->TouchY);
-                    AppState->IsCurrentRecordingSaved = false;
-                    AppState->Mode = AppMode_PlaybackPaused;
-                } break;
-
-                case AppMode_PlaybackPlaying:
-                {
-                    AppState->Mode = AppMode_PlaybackPaused;
-                } break;
-            }
-
-            AppState->LastTouchX = Event->TouchX;
-
-            ImGui::GetIO().MouseDown[0] = false;
-        } break;
-
-        case AppEventType_TouchMovement:
-        {
-            switch(AppState->Mode)
+            switch(AppContext->Mode)
             {
                 case AppMode_PreRecording:
                 {
@@ -775,22 +833,20 @@ APP_CODE_HANDLE_EVENT(AppHandleEvent)
 
                 case AppMode_Recording:
                 {
-                    AddTimePoint(AppState, AppState->RecordingTime, Event->TouchY);
+                    AddTimePoint(AppContext, AppContext->RecordingTime, Input->MouseY);
                 } break;
 
                 case AppMode_PlaybackPaused:
                 {
-                    int TouchDeltaX = Event->TouchX - AppState->LastTouchX;
-
-                    real32 CameraTimePosDeltaPixels = (real32)(-TouchDeltaX);
-                    AppState->CameraTimePos += GetSecondsPerPixel(AppState) * CameraTimePosDeltaPixels;
-                    if(AppState->CameraTimePos < 0.0f)
+                    float CameraTimePosDeltaPixels = (float)(-Input->MouseDeltaX);
+                    AppContext->CameraTimePos += GetSecondsPerPixel(AppContext) * CameraTimePosDeltaPixels;
+                    if(AppContext->CameraTimePos < 0.0f)
                     {
-                        AppState->CameraTimePos = 0.0f;
+                        AppContext->CameraTimePos = 0.0f;
                     }
-                    else if(AppState->CameraTimePos > GetRecordingEndTime(AppState))
+                    else if(AppContext->CameraTimePos > GetRecordingEndTime(AppContext))
                     {
-                        AppState->CameraTimePos = GetRecordingEndTime(AppState);
+                        AppContext->CameraTimePos = GetRecordingEndTime(AppContext);
                     }
                 } break;
 
@@ -798,229 +854,266 @@ APP_CODE_HANDLE_EVENT(AppHandleEvent)
                 {
                 } break;
             }
+        }
 
-            AppState->LastTouchX = Event->TouchX;
-
-            ImGui::GetIO().MousePos = ImVec2((real32)Event->TouchX, (real32)Event->TouchY);
-        } break;
-
-        case AppEventType_ZoomInPressed:
+        if(Input->MouseReleased)
         {
-            IncreasePixelsPerSecond(AppState);
-        } break;
+            switch(AppContext->Mode)
+            {
+                case AppMode_Recording:
+                {
+                    AddTimePoint(AppContext, AppContext->RecordingTime, Input->MouseY);
+                    AppContext->IsCurrentRecordingSaved = false;
+                    AppContext->Mode = AppMode_PlaybackPaused;
+                } break;
 
-        case AppEventType_ZoomOutPressed:
+                case AppMode_PlaybackPlaying:
+                {
+                    AppContext->Mode = AppMode_PlaybackPaused;
+                } break;
+            }
+
+            ImGui::GetIO().MouseDown[0] = false;
+        }
+
+        if(Input->ZoomInPressed)
         {
-            DecreasePixelsPerSecond(AppState);
-        } break;
+            IncreasePixelsPerSecond(AppContext);
+        }
 
-        case AppEventType_NonTouchMovement:
+        if(Input->ZoomOutPressed)
         {
-            ImGui::GetIO().MousePos = ImVec2((real32)Event->TouchX, (real32)Event->TouchY);
-        } break;
+            DecreasePixelsPerSecond(AppContext);
+        }
 
-        case AppEventType_UpdateAndRender:
-        {
-            if(AppState->Mode == AppMode_Recording)
-            {
-                AppState->CameraTimePos = AppState->RecordingTime;
-            }
-            else if(AppState->Mode == AppMode_PlaybackPlaying)
-            {
-                if(AppState->CameraTimePos > GetRecordingEndTime(AppState))
-                {
-                    AppState->CameraTimePos = GetRecordingEndTime(AppState);
-                    AppState->Mode = AppMode_PlaybackPaused;
-                }
-            }
-
-            // update vertex buffer
-            {
-                if(AppState->Mode == AppMode_Recording)
-                {
-                    _PushLastTimePoint(AppState, AppState->RecordingTime);
-                }
-
-                if(AppState->TimePointsInVbo < AppState->TimePointsUsed)
-                {
-                    uint32 ByteOffsetInVbo = AppState->TimePointsInVbo * sizeof(v2);
-                    uint32 NumBytesToCopy = (AppState->TimePointsUsed - AppState->TimePointsInVbo) * sizeof(v2);
-
-#if 0
-                    float NewElements[2 * 16 * AppState->NumValuesPerVboElement];
-                    for(int TimePointsIndex = AppState->TimePointsInVbo; 
-                        TimePointsIndex < AppState->TimePointsUsed; 
-                        TimePointsIndex++)
-                    {
-                        // fill this easy shit in nhk
-                    }
-#endif
-
-                    glBindBuffer(GL_ARRAY_BUFFER, AppState->Vbo);
-                    glBufferSubData(GL_ARRAY_BUFFER, ByteOffsetInVbo, NumBytesToCopy, 
-                                    &AppState->TimePoints[AppState->TimePointsInVbo]);
-                }
-
-                if(AppState->Mode == AppMode_Recording)
-                {
-                    _PopTimePoint(AppState);
-                }
-
-                AppState->TimePointsInVbo = AppState->TimePointsUsed;
-            }
-
-            ImGui::NewFrame();
-
-            // draw options window
-            {
-                v2 GuiWindowSize = {(real32)AppState->WindowWidth / 3.0f, (real32)AppState->WindowHeight / 27.0f};
-                v2 GuiWindowPos = {(real32)AppState->WindowWidth - GuiWindowSize.X, 0};
-
-                ImGui::SetNextWindowPos(ImVec2(GuiWindowPos.X, GuiWindowPos.Y));
-                ImGui::SetNextWindowSize(ImVec2(GuiWindowSize.X, GuiWindowSize.Y)/*, ImGuiSetCond_Once*/);
-                if(ImGui::Begin("window", NULL, 
-                                ImGuiWindowFlags_NoTitleBar |
-                                ImGuiWindowFlags_NoScrollbar |
-                                ImGuiWindowFlags_NoMove |
-                                ImGuiWindowFlags_NoResize))
-                {
-                    ImVec2 ImGuiWindowPosNative = ImGui::GetWindowPos();
-                    ImVec2 ImGuiWindowSizeNative = ImGui::GetWindowSize();
-                    v2 ImGuiWindowPos = {(real32)ImGuiWindowPosNative.x, (real32)ImGuiWindowPosNative.y};
-                    v2 ImGuiWindowSize = {(real32)ImGuiWindowSizeNative.x, (real32)ImGuiWindowSizeNative.y};
-                    RectanglePosSize(&AppState->ImGuiWindowRect, ImGuiWindowPos, ImGuiWindowSize);
-
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImColor(0.3f, 0.3f, 0.3f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImColor(0.3f, 0.3f, 0.3f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImColor(0.3f, 0.3f, 0.3f));
-                    if(ImGui::Button("New"))
-                    {
-                        if(AppState->Mode == AppMode_PlaybackPaused)
-                        {
-                            AppState->TimePointsUsed = 0;
-                            AppState->TimePointsInVbo = 0;
-                            AppState->TimePointsInVbo = 0;
-                            AppState->RecordingTime = 0;
-                            AppState->Mode = AppMode_PreRecording;
-                        }
-                    }
-                    ImGui::PopStyleColor(3);
-
-                    ImGui::SameLine();
-                    if(ImGui::Button("Save"))
-                    {
-                        if(AppState->Mode == AppMode_PlaybackPaused &&
-                           !AppState->IsCurrentRecordingSaved)
-                        {
-                            char *Filename = "feedback_output.fbk";
-                            FILE *File = fopen(Filename, "wb");
-                            if(File == NULL)
-                            {
-                                // TODO: logging
-                                AppState->Printf("Failed to open file: %s\n", Filename);
-                            }
-
-                            // TOUCH_UP causes us to push a time point, so no need to worry about dummies
-                            fwrite((void *)AppState->TimePoints, sizeof(v2), AppState->TimePointsCapacity, File);
-                            fwrite((void *)&AppState->TimePointsUsed, sizeof(uint32), 1, File);
-                            fclose(File);
-                        }
-                    }
-
-                    ImGui::SameLine();
-                    if(ImGui::Button("Load"))
-                    {
-                        if(AppState->Mode == AppMode_PreRecording ||
-                           AppState->Mode == AppMode_PlaybackPaused)
-                        {
-                            char *Filename = "feedback_output.fbk";
-                            FILE *File = fopen(Filename, "rb");
-                            if(File == NULL)
-                            {
-                                // TODO: logging
-                                AppState->Printf("Failed to open file: %s\n", Filename);
-                            }
-
-                            fread((void *)AppState->TimePoints, sizeof(v2), AppState->TimePointsCapacity, File);
-                            fread((void *)&AppState->TimePointsUsed, sizeof(uint32), 1, File);
-                            fclose(File);
-
-                            AppState->CameraTimePos = 0.0f;
-                            SetPixelsPerSecond(AppState, AppState->DefaultPixelsPerSecond);
-
-                            // ensure the newly loaded time points will be uploaded to the vertex buffer
-                            AppState->TimePointsInVbo = 0;
-
-                            AppState->IsCurrentRecordingSaved = true;
-                            AppState->Mode = AppMode_PlaybackPaused;
-                        }
-                    }
-
-                    ImGui::SameLine();
-                    if(ImGui::Button("Play"))
-                    {
-                        if(AppState->Mode == AppMode_PlaybackPaused)
-                        {
-                            AppState->Mode = AppMode_PlaybackPlaying;
-                        }
-                    }
-                }
-                ImGui::End();
-            }
-
-            // draw debug window
-            {
-                v2 GuiWindowSize = {(real32)AppState->WindowWidth / 3.0f, (real32)AppState->WindowHeight / 8.0f};
-                v2 GuiWindowPos = {0, 0};
-
-                ImGui::SetNextWindowPos(ImVec2(GuiWindowPos.X, GuiWindowPos.Y));
-                ImGui::SetNextWindowSize(ImVec2(GuiWindowSize.X, GuiWindowSize.Y));
-                if(ImGui::Begin("debug window", NULL,
-                                ImGuiWindowFlags_NoMove |
-                                ImGuiWindowFlags_NoResize))
-                {
-                    ImGui::Value("CameraTimePos", AppState->CameraTimePos);
-                    ImGui::Checkbox("Draw Points", (bool *)&AppState->ShouldDrawPoints);
-                }
-                ImGui::End();
-            }
-
-#if 0
-            ImGui::ShowTestWindow();
-#endif
-
-            // draw app
-            {
-                real32 HalfWindowWidth = (real32)AppState->WindowWidth / 2.0f;
-                real32 CameraTimePosCentered = AppState->CameraTimePos - (GetSecondsPerPixel(AppState) * HalfWindowWidth);
-                glUniform1f(GetUniformLocation(AppState, AppState->ShaderProgram, "CameraTimePos"), CameraTimePosCentered);
-
-                glUniform1f(GetUniformLocation(AppState, AppState->ShaderProgram, "PixelsPerSecond"), GetPixelsPerSecond(AppState));
-
-                glClearColor(AppState->ClearColor.R, AppState->ClearColor.G, AppState->ClearColor.B, AppState->ClearColor.A);
-                glClear(GL_COLOR_BUFFER_BIT);
-
-                glUseProgram(AppState->ShaderProgram);
-                glBindVertexArray(AppState->Vao);
-
-                bool32 ShouldDrawDummy = AppState->Mode == AppMode_Recording;
-                uint32 TimePointsToRender = ShouldDrawDummy ? AppState->TimePointsInVbo + 1 : AppState->TimePointsInVbo;
-
-                glUniform4fv(GetUniformLocation(AppState, AppState->ShaderProgram, "ShapeColor"), 1, AppState->LineColor.Values);
-                glDrawArrays(GL_LINE_STRIP, 0, TimePointsToRender);
-
-                if(AppState->ShouldDrawPoints)
-                {
-                    glUniform4fv(GetUniformLocation(AppState, AppState->ShaderProgram, "ShapeColor"), 1, AppState->PointColor.Values);
-                    glDrawArrays(GL_POINTS, 0, TimePointsToRender);
-                }
-
-                ImGui::Render();
-                ImGui_RenderFunction(AppState, ImGui::GetDrawData());
-            }
-        } break;
+        ImGui::GetIO().MousePos = ImVec2((float)Input->MouseX, (float)Input->FlippedMouseY);
     }
 
-    AppState->LastFrameTime = CurrentTime;
+    // render
+    {
+        // set camera position
+        if(AppContext->Mode == AppMode_Recording)
+        {
+            AppContext->CameraTimePos = AppContext->RecordingTime;
+        }
+        else if(AppContext->Mode == AppMode_PlaybackPlaying)
+        {
+            if(AppContext->CameraTimePos > GetRecordingEndTime(AppContext))
+            {
+                AppContext->CameraTimePos = GetRecordingEndTime(AppContext);
+                AppContext->Mode = AppMode_PlaybackPaused;
+            }
+        }
+
+        // fill vertex buffer
+        {
+#if 0
+#if 0
+            if(AppContext->Mode == AppMode_Recording)
+            {
+                _PushLastTimePoint(AppContext, AppContext->RecordingTime);
+            }
+#endif
+
+            if(AppContext->TimePointsInVbo < AppContext->TimePointsUsed)
+            {
+                uint32_t ByteOffsetInVbo = AppContext->TimePointsInVbo * sizeof(v2);
+                uint32_t NumBytesToCopy = (AppContext->TimePointsUsed - AppContext->TimePointsInVbo) * sizeof(v2);
+
+                glBindBuffer(GL_ARRAY_BUFFER, AppContext->Vbo);
+                glBufferSubData(GL_ARRAY_BUFFER, ByteOffsetInVbo, NumBytesToCopy, 
+                                &AppContext->TimePoints[AppContext->TimePointsInVbo]);
+            }
+
+#if 0
+            if(AppContext->Mode == AppMode_Recording)
+            {
+                _PopTimePoint(AppContext);
+            }
+
+            AppContext->TimePointsInVbo = AppContext->TimePointsUsed;
+#endif
+#else
+            if(AppContext->TimePointsUsed > 2)
+            {
+                float HalfWindowWidth = (float)AppContext->WindowWidth / 2.0f;
+                float CameraTimePosCentered = AppContext->CameraTimePos - (GetSecondsPerPixel(AppContext) * HalfWindowWidth);
+
+                for(uint32_t TimePointIdx = 1; TimePointIdx < AppContext->TimePointsUsed - 1; TimePointIdx++)
+                {
+                    v2 TimePos1 = AppContext->TimePoints[TimePointIdx - 1];
+                    v2 TimePos2 = AppContext->TimePoints[TimePointIdx];
+                    v2 TimePos3 = AppContext->TimePoints[TimePointIdx + 1];
+
+                    // convert to screen space
+                    v2 ScreenPos1 = V2((TimePos1.X - CameraTimePosCentered) * GetPixelsPerSecond(AppContext), TimePos1.Y);
+                    v2 ScreenPos2 = V2((TimePos2.X - CameraTimePosCentered) * GetPixelsPerSecond(AppContext), TimePos2.Y);
+                    v2 ScreenPos3 = V2((TimePos3.X - CameraTimePosCentered) * GetPixelsPerSecond(AppContext), TimePos3.Y);
+
+                    two_points Points = CreatePoints(ScreenPos1, ScreenPos2, ScreenPos3, 5.0f);
+
+                    TmpBuffer[4*(TimePointIdx - 1) + 0] = Points.P1.X;
+                    TmpBuffer[4*(TimePointIdx - 1) + 1] = Points.P1.Y;
+                    TmpBuffer[4*(TimePointIdx - 1) + 2] = Points.P2.X;
+                    TmpBuffer[4*(TimePointIdx - 1) + 3] = Points.P2.Y;
+
+                    glBindBuffer(GL_ARRAY_BUFFER, AppContext->Vbo);
+                    glBufferData(GL_ARRAY_BUFFER, sizeof(TmpBuffer), TmpBuffer, GL_STREAM_DRAW);
+                }
+
+                AppContext->TimePointsInVbo = AppContext->TimePointsUsed - 2;
+            }
+#endif
+        }
+
+        ImGui::NewFrame();
+
+        // draw options window
+        {
+            v2 GuiWindowSize = {(float)AppContext->WindowWidth / 3.0f, (float)AppContext->WindowHeight / 27.0f};
+            v2 GuiWindowPos = {(float)AppContext->WindowWidth - GuiWindowSize.X, 0};
+
+            ImGui::SetNextWindowPos(ImVec2(GuiWindowPos.X, GuiWindowPos.Y));
+            ImGui::SetNextWindowSize(ImVec2(GuiWindowSize.X, GuiWindowSize.Y)/*, ImGuiSetCond_Once*/);
+            if(ImGui::Begin("window", NULL, 
+                            ImGuiWindowFlags_NoTitleBar |
+                            ImGuiWindowFlags_NoScrollbar |
+                            ImGuiWindowFlags_NoMove |
+                            ImGuiWindowFlags_NoResize))
+            {
+                ImVec2 ImGuiWindowPosNative = ImGui::GetWindowPos();
+                ImVec2 ImGuiWindowSizeNative = ImGui::GetWindowSize();
+                v2 ImGuiWindowPos = {(float)ImGuiWindowPosNative.x, (float)ImGuiWindowPosNative.y};
+                v2 ImGuiWindowSize = {(float)ImGuiWindowSizeNative.x, (float)ImGuiWindowSizeNative.y};
+                AppContext->ImGuiWindowRect = RectFromPosSize(ImGuiWindowPos, ImGuiWindowSize);
+
+                ImGui::PushStyleColor(ImGuiCol_Button, ImColor(0.3f, 0.3f, 0.3f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImColor(0.3f, 0.3f, 0.3f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImColor(0.3f, 0.3f, 0.3f));
+                if(ImGui::Button("New"))
+                {
+                    if(AppContext->Mode == AppMode_PlaybackPaused)
+                    {
+                        AppContext->TimePointsUsed = 0;
+                        AppContext->TimePointsInVbo = 0;
+                        AppContext->RecordingTime = 0;
+                        AppContext->Mode = AppMode_PreRecording;
+                    }
+                }
+                ImGui::PopStyleColor(3);
+
+                ImGui::SameLine();
+                if(ImGui::Button("Save"))
+                {
+                    if(AppContext->Mode == AppMode_PlaybackPaused &&
+                       !AppContext->IsCurrentRecordingSaved)
+                    {
+                        char *Filename = "feedback_output.fbk";
+                        FILE *File = fopen(Filename, "wb");
+                        if(File == NULL)
+                        {
+                            AppContext->Log("Failed to open file: %s\n", Filename);
+                            Assert(0);
+                        }
+
+                        // TOUCH_UP causes us to push a time point, so no need to worry about dummies
+                        fwrite((void *)AppContext->TimePoints, sizeof(v2), AppContext->TimePointsCapacity, File);
+                        fwrite((void *)&AppContext->TimePointsUsed, sizeof(uint32_t), 1, File);
+                        fclose(File);
+                    }
+                }
+
+                ImGui::SameLine();
+                if(ImGui::Button("Load"))
+                {
+                    if(AppContext->Mode == AppMode_PreRecording ||
+                       AppContext->Mode == AppMode_PlaybackPaused)
+                    {
+                        char *Filename = "feedback_output.fbk";
+                        FILE *File = fopen(Filename, "rb");
+                        if(File == NULL)
+                        {
+                            AppContext->Log("Failed to open file: %s\n", Filename);
+                            Assert(0);
+                        }
+
+                        fread((void *)AppContext->TimePoints, sizeof(v2), AppContext->TimePointsCapacity, File);
+                        fread((void *)&AppContext->TimePointsUsed, sizeof(uint32_t), 1, File);
+                        fclose(File);
+
+                        AppContext->CameraTimePos = 0.0f;
+                        SetPixelsPerSecond(AppContext, AppContext->DefaultPixelsPerSecond);
+
+                        // ensure the newly loaded time points will be uploaded to the vertex buffer
+                        AppContext->TimePointsInVbo = 0;
+
+                        AppContext->IsCurrentRecordingSaved = true;
+                        AppContext->Mode = AppMode_PlaybackPaused;
+                    }
+                }
+
+                ImGui::SameLine();
+                if(ImGui::Button("Play"))
+                {
+                    if(AppContext->Mode == AppMode_PlaybackPaused)
+                    {
+                        AppContext->Mode = AppMode_PlaybackPlaying;
+                    }
+                }
+            }
+            ImGui::End();
+        }
+
+        // draw debug window
+        {
+            v2 GuiWindowSize = {(float)AppContext->WindowWidth / 3.0f, (float)AppContext->WindowHeight / 8.0f};
+            v2 GuiWindowPos = {0, 0};
+
+            ImGui::SetNextWindowPos(ImVec2(GuiWindowPos.X, GuiWindowPos.Y));
+            ImGui::SetNextWindowSize(ImVec2(GuiWindowSize.X, GuiWindowSize.Y));
+            if(ImGui::Begin("debug window", NULL,
+                            ImGuiWindowFlags_NoMove |
+                            ImGuiWindowFlags_NoResize))
+            {
+                ImGui::Value("CameraTimePos", AppContext->CameraTimePos);
+                ImGui::Checkbox("Draw Points", (bool *)&AppContext->ShouldDrawPoints);
+            }
+            ImGui::End();
+        }
+
+#if 0
+        ImGui::ShowTestWindow();
+#endif
+
+        // draw app
+        {
+#if 0
+            float HalfWindowWidth = (float)AppContext->WindowWidth / 2.0f;
+            float CameraTimePosCentered = AppContext->CameraTimePos - (GetSecondsPerPixel(AppContext) * HalfWindowWidth);
+            glUniform1f(GetUniformLocation(AppContext, AppContext->ShaderProgram, "CameraTimePos"), CameraTimePosCentered);
+            glUniform1f(GetUniformLocation(AppContext, AppContext->ShaderProgram, "PixelsPerSecond"), GetPixelsPerSecond(AppContext));
+#endif
+
+            glClearColor(EXPANDV4(AppContext->ClearColor));
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+            glUseProgram(AppContext->ShaderProgram);
+            glBindVertexArray(AppContext->Vao);
+
+            uint32_t TimePointsToRender = AppContext->TimePointsInVbo;
+
+            //glUniform4fv(GetUniformLocation(AppContext, AppContext->ShaderProgram, "ShapeColor"), 1, AppContext->LineColor.Components);
+            glDrawArrays(GL_LINE_STRIP, 0, TimePointsToRender);
+
+            if(AppContext->ShouldDrawPoints)
+            {
+                glUniform4fv(GetUniformLocation(AppContext, AppContext->ShaderProgram, "ShapeColor"), 1, AppContext->PointColor.Components);
+                glDrawArrays(GL_POINTS, 0, TimePointsToRender);
+            }
+
+            ImGui::Render();
+            ImGui_RenderFunction(AppContext, ImGui::GetDrawData());
+        }
+    }
 }
 //}
